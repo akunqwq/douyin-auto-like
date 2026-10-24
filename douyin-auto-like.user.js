@@ -260,8 +260,8 @@
 
   // 面板样式
   GM_addStyle(`
-    #dy-al{position:fixed;right:16px;bottom:16px;z-index:999999;width:200px;background:rgba(20,22,26,.9);backdrop-filter:blur(14px) saturate(150%);color:#e8eaed;border:1px solid rgba(255,255,255,.09);border-radius:14px;font:12px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;letter-spacing:.2px;box-shadow:0 10px 30px rgba(0,0,0,.45),inset 0 1px 0 rgba(255,255,255,.04);user-select:none}
-    .head{display:flex;align-items:center;gap:7px;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.07);font-weight:500;cursor:pointer}
+    #dy-al{position:fixed;left:16px;top:16px;z-index:999999;width:200px;background:rgba(20,22,26,.9);backdrop-filter:blur(14px) saturate(150%);color:#e8eaed;border:1px solid rgba(255,255,255,.09);border-radius:14px;font:12px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;letter-spacing:.2px;box-shadow:0 10px 30px rgba(0,0,0,.45),inset 0 1px 0 rgba(255,255,255,.04);user-select:none}
+    .head{display:flex;align-items:center;gap:7px;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.07);font-weight:500;cursor:move;touch-action:none;}
     .dot{width:7px;height:7px;border-radius:50%;background:#FE2C55;flex:none;box-shadow:0 0 0 3px rgba(254,44,85,.16)}
     .dot.off{background:#6b7280;box-shadow:0 0 0 3px rgba(107,114,128,.12)}
     .head b{margin-left:8px;font-weight:400;opacity:.45;font-size:13px}
@@ -291,6 +291,54 @@
       <div class="tip">Alt+Z 暂停 / 继续</div>
     </div>`;
   document.body.appendChild(panel);
+   // 拖动标题栏移动面板，不影响暂停按钮点击。
+  const head = panel.querySelector('.head');
+  let dragState = null;
+
+  head.addEventListener('pointerdown', (e) => {
+    if (!e.isPrimary || e.button !== 0 || e.target.closest('button')) return;
+
+    const rect = panel.getBoundingClientRect();
+
+    dragState = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      left: rect.left,
+      top: rect.top
+    };
+
+    // 将原本的右下角定位转换为左上角定位。
+    panel.style.left = `${rect.left}px`;
+    panel.style.top = `${rect.top}px`;
+    panel.style.right = 'auto';
+    panel.style.bottom = 'auto';
+
+    head.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+
+  head.addEventListener('pointermove', (e) => {
+    if (!dragState || e.pointerId !== dragState.pointerId) return;
+
+    const maxLeft = Math.max(0, window.innerWidth - panel.offsetWidth);
+    const maxTop = Math.max(0, window.innerHeight - panel.offsetHeight);
+
+    const left = dragState.left + e.clientX - dragState.startX;
+    const top = dragState.top + e.clientY - dragState.startY;
+
+    panel.style.left = `${Math.min(Math.max(0, left), maxLeft)}px`;
+    panel.style.top = `${Math.min(Math.max(0, top), maxTop)}px`;
+  });
+
+  const endDrag = (e) => {
+    if (dragState?.pointerId === e.pointerId) {
+      dragState = null;
+    }
+  };
+
+  head.addEventListener('pointerup', endDrag);
+  head.addEventListener('pointercancel', endDrag);
 
   panel.querySelector('[data-f="btn"]').addEventListener('click', (e) => {
     e.stopPropagation();
