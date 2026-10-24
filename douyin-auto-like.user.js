@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         抖音推荐流 · 自动点赞（Z 键通道）
-// @version      1.2.2
+// @version      1.5.1
 // @description  至少播放 3 秒，再结合视频时长随机等待；暂停或缓冲时冻结剩余时间，恢复后继续。
 // @author       阿鲲
 // @match        https://www.douyin.com/*
+// @grant        GM_registerMenuCommand
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_addStyle
@@ -17,6 +18,8 @@
 
   const STORE_KEY = 'dyAutoLike:cfg';
   const DAY_KEY = 'dyAutoLike:day';
+  const PANEL_KEY = 'dyAutoLike:panelVisible';
+  let panelVisible = GM_getValue(PANEL_KEY, true) !== false;
   const cfg = Object.assign({ enabled: true, dwellMinMs: 3000, dwellMaxMs: 8000 }, GM_getValue(STORE_KEY, {}));
   const save = () => GM_setValue(STORE_KEY, cfg);
   const rand = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
@@ -258,7 +261,6 @@
   // 面板样式
   GM_addStyle(`
     #dy-al{position:fixed;right:16px;bottom:16px;z-index:999999;width:200px;background:rgba(20,22,26,.9);backdrop-filter:blur(14px) saturate(150%);color:#e8eaed;border:1px solid rgba(255,255,255,.09);border-radius:14px;font:12px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;letter-spacing:.2px;box-shadow:0 10px 30px rgba(0,0,0,.45),inset 0 1px 0 rgba(255,255,255,.04);user-select:none}
-    #dy-al.min .body{display:none}
     .head{display:flex;align-items:center;gap:7px;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.07);font-weight:500;cursor:pointer}
     .dot{width:7px;height:7px;border-radius:50%;background:#FE2C55;flex:none;box-shadow:0 0 0 3px rgba(254,44,85,.16)}
     .dot.off{background:#6b7280;box-shadow:0 0 0 3px rgba(107,114,128,.12)}
@@ -274,9 +276,12 @@
 
   const panel = document.createElement('div');
   panel.id = 'dy-al';
-  panel.className = 'min';
   panel.innerHTML = `
-    <div class="head"><i class="dot"></i>自动点赞<u data-f="btn">暂停</u><b>+</b></div>
+    <div class="head">
+    <i class="dot"></i>
+    自动点赞
+    <button type="button" data-f="btn">暂停</button>
+    </div>
     <div class="body">
       <div class="row"><b data-f="index">今天已刷 0 个视频</b></div>
       <div class="row"><span>今日自动赞</span><b data-f="likes">0</b></div>
@@ -287,19 +292,34 @@
     </div>`;
   document.body.appendChild(panel);
 
-  panel.querySelector('.head').addEventListener('click', () => {
-    panel.classList.toggle('min');
-    panel.querySelector('.head b').textContent = panel.classList.contains('min') ? '+' : '−';
-  });
-
   panel.querySelector('[data-f="btn"]').addEventListener('click', (e) => {
     e.stopPropagation();
     toggle();
   });
 
+  const togglePanelVisibility = () => {
+  panelVisible = !panelVisible;
+  GM_setValue(PANEL_KEY, panelVisible);
+  panel.style.display = panelVisible ? '' : 'none';
+};
+
+const showTodayStats = () => {
+  alert(
+    `抖音自动点赞\n` +
+    `运行状态：${cfg.enabled ? '运行中' : '已暂停'}\n` +
+    `今日刷视频：${s.index}\n` +
+    `今日自动点赞：${s.likes}`
+  );
+};
+
+GM_registerMenuCommand('自动点赞：暂停 / 继续', toggle);
+GM_registerMenuCommand('自动点赞：显示 / 隐藏页面面板', togglePanelVisibility);
+GM_registerMenuCommand('自动点赞：查看今日统计', showTodayStats);
+
   const TONE = { ok: '#7ee787', warn: '#f2cc60', mute: '#9aa0a6' };
 
   function render() {
+    panel.style.display = panelVisible ? '' : 'none';
     panel.querySelector('[data-f="index"]').textContent = `今天已刷 ${s.index} 个视频`;
     panel.querySelector('[data-f="likes"]').textContent = s.likes;
 
