@@ -8,8 +8,8 @@
 // @grant        GM_getValue
 // @grant        GM_addStyle
 // @run-at       document-idle
-// @updateURL    https://raw.githubusercontent.com/<用户>/<仓库>/main/douyin-auto-like.user.js
-// @downloadURL  https://raw.githubusercontent.com/<用户>/<仓库>/main/douyin-auto-like.user.js
+// @updateURL    https://raw.githubusercontent.com/akunqwq/douyin-auto-like/main/douyin-auto-like.user.js
+// @downloadURL  https://raw.githubusercontent.com/akunqwq/douyin-auto-like/main/douyin-auto-like.user.js
 // ==/UserScript==
 
 (function () {
