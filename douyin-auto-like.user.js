@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         抖音推荐流 · 自动点赞（Z 键通道）
-// @version      1.6.2
+// @version      1.6.4
 // @description  至少播放 3 秒，再结合视频时长随机等待；暂停或缓冲时冻结剩余时间，恢复后继续。
 // @author       阿鲲
 // @match        https://www.douyin.com/*
@@ -259,111 +259,107 @@
   }, true);
 
   // 面板样式
-  GM_addStyle(`
-    #dy-al{position:fixed;left:16px;top:16px;z-index:999999;width:200px;background:rgba(20,22,26,.9);backdrop-filter:blur(14px) saturate(150%);color:#e8eaed;border:1px solid rgba(255,255,255,.09);border-radius:14px;font:12px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;letter-spacing:.2px;box-shadow:0 10px 30px rgba(0,0,0,.45),inset 0 1px 0 rgba(255,255,255,.04);user-select:none}
-      display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 10px 12px;
-  font-weight: 500;
-  cursor: move;
-  touch-action: none;
-}
+GM_addStyle(`
+  #dy-al {
+    position: fixed; left: 16px; top: 16px; z-index: 999999;
+    width: 200px; background: rgba(20,22,26,.9); backdrop-filter: blur(14px) saturate(150%);
+    color: #e8eaed; border: 1px solid rgba(255,255,255,.09); border-radius: 14px;
+    font: 12px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    letter-spacing: .2px; box-shadow: 0 10px 30px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.04);
+    user-select: none;
+  }
+  #dy-al .head {
+    display: flex; align-items: center; gap: 7px;
+    padding: 10px 12px; font-weight: 500; cursor: move; touch-action: none;
+  }
+  #dy-al .dot {
+    width: 8px; height: 8px; border-radius: 50%; background: #22c55e; flex-shrink: 0;
+  }
+  #dy-al .dot.off { background: #f50b0b; }
+  #dy-al .head button {
+    margin-left: auto; padding: 2px 8px; border: none; border-radius: 6px;
+    background: rgba(255,255,255,.09); color: inherit; font-size: 11px; cursor: pointer; opacity: .85;
+  }
+  #dy-al .head button:hover { background: rgba(255,255,255,.16); }
+  #dy-al .body { padding: 8px 12px 9px; }
+  #dy-al .row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 3.5px 0; }
+  #dy-al .row span { opacity: .5; font-size: 11.5px; }
+  #dy-al .row b { font-weight: 500; color: #8ab4f8; max-width: 132px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
+  #dy-al .tip { margin-top: 7px; padding-top: 7px; border-top: 1px solid rgba(255,255,255,.07); opacity: .4; font-size: 11px; }
+`);
 
-#dy-al .dot {
-  flex: 0 0 8px;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #22c55e;
-  box-shadow: none;
-}
-
-#dy-al .dot.off {
-  background: #f50b0b;
-}
-    .head b{margin-left:8px;font-weight:400;opacity:.45;font-size:13px}
-    .head u{margin-left:auto;padding:1.5px 7px;border-radius:6px;background:rgba(255,255,255,.09);text-decoration:none;font-size:11px;opacity:.85}
-    .head u:hover{background:rgba(255,255,255,.16)}
-    .body{padding:8px 12px 9px}
-    .row{display:flex;align-items:baseline;justify-content:space-between;gap:8px;padding:3.5px 0}
-    .row span{opacity:.5;font-size:11.5px;flex:none}
-    .row b{font-weight:500;color:#8ab4f8;max-width:132px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right}
-    .tip{margin-top:7px;padding-top:7px;border-top:1px solid rgba(255,255,255,.07);opacity:.4;font-size:11px}
-  `);
-
-  const panel = document.createElement('div');
-  panel.id = 'dy-al';
-  panel.innerHTML = `
-    <div class="head">
+const panel = document.createElement('div');
+panel.id = 'dy-al';
+panel.innerHTML = `
+  <div class="head">
     <i class="dot"></i>
-    自动点赞
+    <span>自动点赞</span>
     <button type="button" data-f="btn">暂停</button>
-    </div>
-    <div class="body">
-      <div class="row"><b data-f="index">今天已刷 0 个视频</b></div>
-      <div class="row"><span>今日自动赞</span><b data-f="likes">0</b></div>
-      <div class="row"><span>本视频</span><b data-f="now">未赞</b></div>
-      <div class="row"><span>播放倒计时</span><b data-f="countdown">等待视频</b></div>
-      <div class="row" data-f="whyRow" style="display:none"><span>提示</span><b data-f="why"></b></div>
-      <div class="tip">Alt+Z 暂停 / 继续</div>
-    </div>`;
-  document.body.appendChild(panel);
-   // 拖动标题栏移动面板，不影响暂停按钮点击。
-  const head = panel.querySelector('.head');
-  let dragState = null;
+  </div>
+  <div class="body">
+    <div class="row"><b data-f="index">今天已刷 0 个视频</b></div>
+    <div class="row"><span>今日自动赞</span><b data-f="likes">0</b></div>
+    <div class="row"><span>本视频</span><b data-f="now">未赞</b></div>
+    <div class="row"><span>播放倒计时</span><b data-f="countdown">等待视频</b></div>
+    <div class="row" data-f="whyRow" style="display:none"><span>提示</span><b data-f="why"></b></div>
+    <div class="tip">Alt+Z 暂停 / 继续</div>
+  </div>`;
+document.body.appendChild(panel);
 
-  head.addEventListener('pointerdown', (e) => {
-    if (!e.isPrimary || e.button !== 0 || e.target.closest('button')) return;
+// 拖动标题栏移动面板，不影响暂停按钮点击。
+const head = panel.querySelector('.head');
+let dragState = null;
 
-    const rect = panel.getBoundingClientRect();
+head.addEventListener('pointerdown', (e) => {
+  if (!e.isPrimary || e.button !== 0 || e.target.closest('button')) return;
 
-    dragState = {
-      pointerId: e.pointerId,
-      startX: e.clientX,
-      startY: e.clientY,
-      left: rect.left,
-      top: rect.top
-    };
+  const rect = panel.getBoundingClientRect();
 
-    // 将原本的右下角定位转换为左上角定位。
-    panel.style.left = `${rect.left}px`;
-    panel.style.top = `${rect.top}px`;
-    panel.style.right = 'auto';
-    panel.style.bottom = 'auto';
-
-    head.setPointerCapture(e.pointerId);
-    e.preventDefault();
-  });
-
-  head.addEventListener('pointermove', (e) => {
-    if (!dragState || e.pointerId !== dragState.pointerId) return;
-
-    const maxLeft = Math.max(0, window.innerWidth - panel.offsetWidth);
-    const maxTop = Math.max(0, window.innerHeight - panel.offsetHeight);
-
-    const left = dragState.left + e.clientX - dragState.startX;
-    const top = dragState.top + e.clientY - dragState.startY;
-
-    panel.style.left = `${Math.min(Math.max(0, left), maxLeft)}px`;
-    panel.style.top = `${Math.min(Math.max(0, top), maxTop)}px`;
-  });
-
-  const endDrag = (e) => {
-    if (dragState?.pointerId === e.pointerId) {
-      dragState = null;
-    }
+  dragState = {
+    pointerId: e.pointerId,
+    startX: e.clientX,
+    startY: e.clientY,
+    left: rect.left,
+    top: rect.top
   };
 
-  head.addEventListener('pointerup', endDrag);
-  head.addEventListener('pointercancel', endDrag);
+  panel.style.left = `${rect.left}px`;
+  panel.style.top = `${rect.top}px`;
+  panel.style.right = 'auto';
+  panel.style.bottom = 'auto';
 
-  panel.querySelector('[data-f="btn"]').addEventListener('click', (e) => {
-    e.stopPropagation();
-    toggle();
-  });
+  head.setPointerCapture(e.pointerId);
+  e.preventDefault();
+});
 
-  const togglePanelVisibility = () => {
+head.addEventListener('pointermove', (e) => {
+  if (!dragState || e.pointerId !== dragState.pointerId) return;
+
+  const maxLeft = Math.max(0, window.innerWidth - panel.offsetWidth);
+  const maxTop = Math.max(0, window.innerHeight - panel.offsetHeight);
+
+  const left = dragState.left + e.clientX - dragState.startX;
+  const top = dragState.top + e.clientY - dragState.startY;
+
+  panel.style.left = `${Math.min(Math.max(0, left), maxLeft)}px`;
+  panel.style.top = `${Math.min(Math.max(0, top), maxTop)}px`;
+});
+
+const endDrag = (e) => {
+  if (dragState?.pointerId === e.pointerId) {
+    dragState = null;
+  }
+};
+
+head.addEventListener('pointerup', endDrag);
+head.addEventListener('pointercancel', endDrag);
+
+panel.querySelector('[data-f="btn"]').addEventListener('click', (e) => {
+  e.stopPropagation();
+  toggle();
+});
+
+const togglePanelVisibility = () => {
   panelVisible = !panelVisible;
   GM_setValue(PANEL_KEY, panelVisible);
   panel.style.display = panelVisible ? '' : 'none';
