@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         抖音推荐流 · 自动点赞（Z 键通道）
-// @version      1.1.0
-// @description  按视频实际播放时长随机等待后自动点赞；视频暂停或缓冲时保留倒计时，恢复后继续。面板显示今日刷数、自动点赞数与当前视频赞态。
+// @version      1.2.2
+// @description  至少播放 3 秒，再结合视频时长随机等待；暂停或缓冲时冻结剩余时间，恢复后继续。
 // @author       阿鲲
 // @match        https://www.douyin.com/*
 // @grant        GM_setValue
@@ -21,6 +21,11 @@
   const save = () => GM_setValue(STORE_KEY, cfg);
   const rand = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
 
+  // 自适应等待：短视频缩短最低等待时间，目标不超过视频总时长的90%。
+  const MIN_PLAY_MS = Math.max(3000, Number(cfg.dwellMinMs) || 3000);
+  const MAX_DURATION_EXTRA_MS = 9000;
+  const DURATION_EXTRA_RATIO = 0.25;
+
   // 今日计数：跨刷新保留，跨天归零
   const today = () => { const d = new Date(); return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`; };
   const old = GM_getValue(DAY_KEY, null);
@@ -28,7 +33,7 @@
 
   const s = {
     vid: '', index: day.n, likes: day.like || 0, pending: '', remainingMs: null,
-    lastMediaTime: null, lastWallAt: 0,
+    durationUnknownSince: 0, lastMediaTime: null, lastWallAt: 0,
     seen: new Set(), tracked: new Set(), counted: new Set(),
     now: '未赞', why: ''
   };
@@ -67,58 +72,119 @@
   };
 
   // 倒计时归属当前 pending 视频，只在视频时间轴实际前进时扣减。
-  const advanceCountdown = (vid) => {
-    if (!s.pending || s.pending !== vid) {
-      resetPlaybackBaseline();
-      return;
-    }
+  // 目标等待时间：至少 3 秒 + 按视频时长随机增加 0%～25%，额外部分最多 9 秒。
+  // 暂停、缓冲、切换视频或暂停脚本时均保留 remainingMs，不重新随机。
+    const chooseWaitMs = (video) => {
+    const durationMs = Math.floor(Number(video?.duration) * 1000);
+    if (!Number.isFinite(durationMs) || durationMs <= 0) return null;
 
-    const video = getVideo();
-    if (!cfg.enabled || getVid() !== s.pending || !isVideoPlaying(video)) {
-      // 持续更新基准点，避免暂停/缓冲期间的时间被计入倒计时。
-      s.lastMediaTime = video ? video.currentTime : null;
-      s.lastWallAt = performance.now();
-      return;
-    }
+    const latestWaitMs = Math.floor(durationMs * 0.9 - video.currentTime * 1000);
+    const minWaitMs = Math.min(MIN_PLAY_MS, Math.floor(durationMs * 0.6));
 
-    const now = performance.now();
-    const mediaTime = video.currentTime;
-    if (s.lastMediaTime !== null && s.lastWallAt > 0) {
-      const mediaDelta = mediaTime - s.lastMediaTime;
-      const wallDelta = Math.max(0, now - s.lastWallAt);
-      const plausibleMax = Math.max(0.75, (wallDelta / 1000) * 2.5);
-      if (mediaDelta > 0 && mediaDelta <= plausibleMax) {
-        s.remainingMs = Math.max(0, (s.remainingMs ?? 0) - mediaDelta * 1000);
-      }
-    }
-    s.lastMediaTime = mediaTime;
-    s.lastWallAt = now;
+    if (latestWaitMs < minWaitMs) return -1;
 
-    if ((s.remainingMs ?? 0) <= 0) tryAutoLike(vid);
+    const maxExtraMs = Math.max(0, Math.min(
+      Math.floor(durationMs * DURATION_EXTRA_RATIO),
+      MAX_DURATION_EXTRA_MS,
+      latestWaitMs - minWaitMs
+    ));
+
+    return minWaitMs + rand(0, maxExtraMs);
   };
 
-  const tryAutoLike = (vid) => {
-    // 多重校验：只允许当前播放中的待处理视频执行，而且先清除 pending 再派发按键，防止重复触发。
+  const clearTask = (why = '') => {
+    s.pending = '';
+    s.remainingMs = null;
+    s.durationUnknownSince = 0;
+    s.why = why;
+    resetPlaybackBaseline();
+  };
+
+  // 统一处理计时初始化、暂停、累计播放时间和到期判断。
+  const advanceCountdown = (vid) => {
+    const video = getVideo();
+    const now = performance.now();
+    const mediaTime = video?.currentTime ?? null;
+
+    if (s.pending && s.pending === vid && video?.ended && getVid() === vid) {
+      clearTask(readLike() === true ? '' : '视频已结束，未触发');
+      return false;
+    }
+
+    if (!s.pending || s.pending !== vid) {
+      resetPlaybackBaseline();
+      s.durationUnknownSince = 0;
+      return false;
+    }
+
+    if (!cfg.enabled || getVid() !== s.pending || !isVideoPlaying(video)) {
+      s.lastMediaTime = mediaTime;
+      s.lastWallAt = now;
+      s.durationUnknownSince = 0;
+      return false;
+    }
+
+    if (s.remainingMs === null) {
+      const target = chooseWaitMs(video);
+
+      if (target === -1) {
+        clearTask('视频接近结束，跳过');
+        return false;
+      }
+
+      if (target !== null) {
+        s.remainingMs = target;
+      } else {
+        if (!s.durationUnknownSince) s.durationUnknownSince = now;
+
+        if (now - s.durationUnknownSince < 2000) {
+          s.lastMediaTime = mediaTime;
+          s.lastWallAt = now;
+          return false;
+        }
+
+        s.remainingMs = rand(cfg.dwellMinMs, cfg.dwellMaxMs);
+      }
+
+      s.durationUnknownSince = 0;
+      s.lastMediaTime = mediaTime;
+      s.lastWallAt = now;
+      return false;
+    }
+
+    if (s.lastMediaTime !== null && s.lastWallAt > 0) {
+      const delta = mediaTime - s.lastMediaTime;
+      const maxDelta = Math.max(0.75, ((now - s.lastWallAt) / 1000) * 2.5);
+
+      if (delta > 0 && delta <= maxDelta) {
+        s.remainingMs = Math.max(0, s.remainingMs - delta * 1000);
+      }
+    }
+
+    s.lastMediaTime = mediaTime;
+    s.lastWallAt = now;
+    return s.remainingMs <= 0;
+  };
+
+   const tryAutoLike = (vid) => {
+    // 最后复核当前视频、运行状态及点赞状态。
     if (!cfg.enabled || !s.pending || s.pending !== vid || getVid() !== vid) return;
     if (!isVideoPlaying(getVideo())) return;
 
     const cur = readLike();
-    if (cur === true) {
-      s.pending = '';
-      s.remainingMs = null;
-      s.why = '';
-      resetPlaybackBaseline();
-      return;
-    }
+
     if (cur === null) {
       s.why = '读不到点赞状态';
-      return; // 保留任务；读到明确的未赞状态后再执行，不会重复发送按键。
+      return;
     }
 
-    s.pending = '';
-    s.remainingMs = null;
-    s.why = '';
-    resetPlaybackBaseline();
+    if (cur === true) {
+      clearTask();
+      return;
+    }
+
+    // 先清除任务，再派发按键，避免重复触发。
+    clearTask();
     s.tracked.add(vid);
     press('z', 'KeyZ', 90);
   };
@@ -133,15 +199,15 @@
 
   const tick = () => {
     const vid = getVid();
+
     if (!vid) {
-      resetPlaybackBaseline();
+      advanceCountdown('');
       render();
       return;
     }
 
     const liked = readLike();
 
-    // 脚本派发的视频观测到已赞，才算一次自动点赞；counted 防止同一视频重复计数。
     if (liked === true && s.tracked.has(vid) && !s.counted.has(vid)) {
       s.counted.add(vid);
       s.likes++;
@@ -151,20 +217,20 @@
 
     s.now = liked === true ? '已赞' : (liked === null ? '未知' : '未赞');
 
-    // 脚本暂停时冻结当前任务；恢复后同一视频继续剩余倒计时。
+    // 脚本暂停时只冻结任务，不创建新任务。
     if (!cfg.enabled) {
-      const video = getVideo();
-      s.lastMediaTime = video ? video.currentTime : null;
-      s.lastWallAt = performance.now();
+      advanceCountdown(vid);
       s.why = '';
       render();
       return;
     }
 
+    // 视频切换时只初始化一次任务。
     if (vid !== s.vid) {
       s.vid = vid;
       s.pending = s.seen.has(vid) ? '' : vid;
-      s.remainingMs = s.pending ? rand(cfg.dwellMinMs, cfg.dwellMaxMs) : null;
+      s.remainingMs = null;
+      s.durationUnknownSince = 0;
       resetPlaybackBaseline();
       s.why = s.pending ? '' : '重复视频';
 
@@ -176,7 +242,7 @@
       }
     }
 
-    advanceCountdown(vid);
+    if (advanceCountdown(vid)) tryAutoLike(vid);
     render();
   };
 
@@ -245,11 +311,17 @@
     if (!s.pending) {
       countdown.textContent = s.why === '重复视频' ? '已看过' : (s.now === '已赞' ? '已完成' : '—');
     } else {
-      const seconds = (Math.max(0, s.remainingMs ?? 0) / 1000).toFixed(1);
       const video = getVideo();
-      if (!cfg.enabled) countdown.textContent = `脚本暂停 · ${seconds}s`;
-      else if (getVid() !== s.pending || !isVideoPlaying(video)) countdown.textContent = `暂停中 · ${seconds}s`;
-      else countdown.textContent = `${seconds}s`;
+      if (s.remainingMs === null) {
+        if (!cfg.enabled) countdown.textContent = '脚本暂停 · 等待初始化';
+        else if (getVid() !== s.pending || !isVideoPlaying(video)) countdown.textContent = '等待播放';
+        else countdown.textContent = '读取时长…';
+      } else {
+        const seconds = (Math.max(0, s.remainingMs) / 1000).toFixed(1);
+        if (!cfg.enabled) countdown.textContent = `脚本暂停 · ${seconds}s`;
+        else if (getVid() !== s.pending || !isVideoPlaying(video)) countdown.textContent = `暂停中 · ${seconds}s`;
+        else countdown.textContent = `${seconds}s`;
+      }
     }
 
     panel.querySelector('[data-f="whyRow"]').style.display = s.why ? 'flex' : 'none';
