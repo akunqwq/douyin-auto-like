@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         抖音推荐流 · 自动点赞（Z 键通道）
-// @version      1.0.0
-// @description  刷推荐流时按视频停留随机秒数后自动点赞。面板显示今日刷数、自动点赞数与当前视频赞态。
+// @version      1.1.0
+// @description  按视频实际播放时长随机等待后自动点赞；视频暂停或缓冲时保留倒计时，恢复后继续。面板显示今日刷数、自动点赞数与当前视频赞态。
 // @author       阿鲲
 // @match        https://www.douyin.com/*
 // @grant        GM_setValue
@@ -27,18 +27,26 @@
   const day = (old && old.d === today()) ? old : { d: today(), n: 0, like: 0 };
 
   const s = {
-    vid: '', timer: 0, index: day.n, likes: day.like || 0, pending: '',
+    vid: '', index: day.n, likes: day.like || 0, pending: '', remainingMs: null,
+    lastMediaTime: null, lastWallAt: 0,
     seen: new Set(), tracked: new Set(), counted: new Set(),
     now: '未赞', why: ''
   };
 
   const getActive = () => document.querySelector('[data-e2e="feed-active-video"]');
+  const getVideo = () => getActive()?.querySelector('video') || null;
 
   const getVid = () => {
     const active = getActive();
     if (!active) return '';
     return active.getAttribute('data-e2e-vid') || active.querySelector('video')?.src || '';
   };
+
+  const isVideoPlaying = (video) => !!video
+    && !video.paused
+    && !video.ended
+    && !video.seeking
+    && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA;
 
   // 限定在活动视频内查点赞按钮：推荐流同时存在多个视频节点，全局查会读到别的视频
   const readLike = () => {
@@ -53,39 +61,87 @@
     target.dispatchEvent(new KeyboardEvent('keyup', init));
   };
 
-  const setWhy = (msg) => { s.why = msg; render(); };
+  const resetPlaybackBaseline = () => {
+    s.lastMediaTime = null;
+    s.lastWallAt = 0;
+  };
 
-  // 待处理视频由 pending 表达：暂停只撤定时器不撤任务，恢复后仍是同一视频就重新排
-  const schedule = () => {
-    clearTimeout(s.timer);
-    s.timer = 0;
-    if (!cfg.enabled || !s.pending) return;
-    s.timer = setTimeout(() => {
-      const vid = s.pending;
-      if (getVid() !== vid) return;
-      const cur = readLike();
-      if (cur === true) return setWhy('');
-      if (cur === null) return setWhy('读不到点赞状态');
+  // 倒计时归属当前 pending 视频，只在视频时间轴实际前进时扣减。
+  const advanceCountdown = (vid) => {
+    if (!s.pending || s.pending !== vid) {
+      resetPlaybackBaseline();
+      return;
+    }
+
+    const video = getVideo();
+    if (!cfg.enabled || getVid() !== s.pending || !isVideoPlaying(video)) {
+      // 持续更新基准点，避免暂停/缓冲期间的时间被计入倒计时。
+      s.lastMediaTime = video ? video.currentTime : null;
+      s.lastWallAt = performance.now();
+      return;
+    }
+
+    const now = performance.now();
+    const mediaTime = video.currentTime;
+    if (s.lastMediaTime !== null && s.lastWallAt > 0) {
+      const mediaDelta = mediaTime - s.lastMediaTime;
+      const wallDelta = Math.max(0, now - s.lastWallAt);
+      const plausibleMax = Math.max(0.75, (wallDelta / 1000) * 2.5);
+      if (mediaDelta > 0 && mediaDelta <= plausibleMax) {
+        s.remainingMs = Math.max(0, (s.remainingMs ?? 0) - mediaDelta * 1000);
+      }
+    }
+    s.lastMediaTime = mediaTime;
+    s.lastWallAt = now;
+
+    if ((s.remainingMs ?? 0) <= 0) tryAutoLike(vid);
+  };
+
+  const tryAutoLike = (vid) => {
+    // 多重校验：只允许当前播放中的待处理视频执行，而且先清除 pending 再派发按键，防止重复触发。
+    if (!cfg.enabled || !s.pending || s.pending !== vid || getVid() !== vid) return;
+    if (!isVideoPlaying(getVideo())) return;
+
+    const cur = readLike();
+    if (cur === true) {
       s.pending = '';
-      s.tracked.add(vid);
-      press('z', 'KeyZ', 90);
-    }, rand(cfg.dwellMinMs, cfg.dwellMaxMs));
+      s.remainingMs = null;
+      s.why = '';
+      resetPlaybackBaseline();
+      return;
+    }
+    if (cur === null) {
+      s.why = '读不到点赞状态';
+      return; // 保留任务；读到明确的未赞状态后再执行，不会重复发送按键。
+    }
+
+    s.pending = '';
+    s.remainingMs = null;
+    s.why = '';
+    resetPlaybackBaseline();
+    s.tracked.add(vid);
+    press('z', 'KeyZ', 90);
   };
 
   const toggle = () => {
     cfg.enabled = !cfg.enabled;
     save();
-    schedule();
+    // 不重置 remainingMs：通过快捷键暂停脚本后恢复，也继续剩余倒计时。
+    resetPlaybackBaseline();
     render();
   };
 
   const tick = () => {
     const vid = getVid();
-    if (!vid) return;
+    if (!vid) {
+      resetPlaybackBaseline();
+      render();
+      return;
+    }
 
     const liked = readLike();
 
-    // 脚本派发的视频观测到已赞，才算一次自动点赞
+    // 脚本派发的视频观测到已赞，才算一次自动点赞；counted 防止同一视频重复计数。
     if (liked === true && s.tracked.has(vid) && !s.counted.has(vid)) {
       s.counted.add(vid);
       s.likes++;
@@ -95,22 +151,32 @@
 
     s.now = liked === true ? '已赞' : (liked === null ? '未知' : '未赞');
 
-    if (!cfg.enabled) return setWhy('');
-    if (vid === s.vid) return render();
-
-    s.vid = vid;
-
-    s.pending = s.seen.has(vid) ? '' : vid;
-    s.why = s.pending ? '' : '重复视频';
-
-    if (s.pending) {
-      s.seen.add(vid);
-      s.index++;
-      day.n = s.index;
-      GM_setValue(DAY_KEY, day);
+    // 脚本暂停时冻结当前任务；恢复后同一视频继续剩余倒计时。
+    if (!cfg.enabled) {
+      const video = getVideo();
+      s.lastMediaTime = video ? video.currentTime : null;
+      s.lastWallAt = performance.now();
+      s.why = '';
+      render();
+      return;
     }
 
-    schedule();
+    if (vid !== s.vid) {
+      s.vid = vid;
+      s.pending = s.seen.has(vid) ? '' : vid;
+      s.remainingMs = s.pending ? rand(cfg.dwellMinMs, cfg.dwellMaxMs) : null;
+      resetPlaybackBaseline();
+      s.why = s.pending ? '' : '重复视频';
+
+      if (s.pending) {
+        s.seen.add(vid);
+        s.index++;
+        day.n = s.index;
+        GM_setValue(DAY_KEY, day);
+      }
+    }
+
+    advanceCountdown(vid);
     render();
   };
 
@@ -149,7 +215,8 @@
       <div class="row"><b data-f="index">今天已刷 0 个视频</b></div>
       <div class="row"><span>今日自动赞</span><b data-f="likes">0</b></div>
       <div class="row"><span>本视频</span><b data-f="now">未赞</b></div>
-      <div class="row" data-f="whyRow" style="display:none"><span>未赞原因</span><b data-f="why"></b></div>
+      <div class="row"><span>播放倒计时</span><b data-f="countdown">等待视频</b></div>
+      <div class="row" data-f="whyRow" style="display:none"><span>提示</span><b data-f="why"></b></div>
       <div class="tip">Alt+Z 暂停 / 继续</div>
     </div>`;
   document.body.appendChild(panel);
@@ -174,6 +241,17 @@
     now.textContent = s.now;
     now.style.color = s.now === '已赞' ? TONE.ok : (s.why ? TONE.warn : TONE.mute);
 
+    const countdown = panel.querySelector('[data-f="countdown"]');
+    if (!s.pending) {
+      countdown.textContent = s.why === '重复视频' ? '已看过' : (s.now === '已赞' ? '已完成' : '—');
+    } else {
+      const seconds = (Math.max(0, s.remainingMs ?? 0) / 1000).toFixed(1);
+      const video = getVideo();
+      if (!cfg.enabled) countdown.textContent = `脚本暂停 · ${seconds}s`;
+      else if (getVid() !== s.pending || !isVideoPlaying(video)) countdown.textContent = `暂停中 · ${seconds}s`;
+      else countdown.textContent = `${seconds}s`;
+    }
+
     panel.querySelector('[data-f="whyRow"]').style.display = s.why ? 'flex' : 'none';
     panel.querySelector('[data-f="why"]').textContent = s.why;
     panel.querySelector('[data-f="why"]').style.color = TONE.warn;
@@ -183,5 +261,6 @@
   }
 
   render();
-  setInterval(tick, 400);
+  // 一个统一轮询：切换视频、读取赞态与推进播放倒计时，避免多个定时器互相重置任务。
+  setInterval(tick, 100);
 })();
