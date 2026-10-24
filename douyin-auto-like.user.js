@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         抖音推荐流 · 自动点赞（Z 键通道）
-// @version      1.5.2
+// @version      1.6.0
 // @description  至少播放 3 秒，再结合视频时长随机等待；暂停或缓冲时冻结剩余时间，恢复后继续。
 // @author       阿鲲
 // @match        https://www.douyin.com/*
@@ -261,9 +261,16 @@
   // 面板样式
   GM_addStyle(`
     #dy-al{position:fixed;left:16px;top:16px;z-index:999999;width:200px;background:rgba(20,22,26,.9);backdrop-filter:blur(14px) saturate(150%);color:#e8eaed;border:1px solid rgba(255,255,255,.09);border-radius:14px;font:12px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;letter-spacing:.2px;box-shadow:0 10px 30px rgba(0,0,0,.45),inset 0 1px 0 rgba(255,255,255,.04);user-select:none}
-    .head{display:flex;align-items:center;gap:7px;padding:10px 12px;border-bottom:1px solid rgba(255, 255, 255, 0.07);font-weight:500;cursor:move;touch-action:none;}
-    #dy-al .dot {background: #22c55e;box-shadow: 0 0 0 3px rgba(34, 197, 94, .16);}
-    #dy-al .dot.off {background: #6b7280;box-shadow: 0 0 0 3px rgba(107, 114, 128, .12);}
+    .head{display:flex;align-items:center;gap:7px;padding:10px 12px;border-bottom:1px solid rgba(255, 0, 0, 0.07);font-weight:500;cursor:move;touch-action:none;}
+ #dy-al .dot {
+  background: #22c55e;
+  box-shadow: 0 0 0 3px rgba(34, 197, 94, .16);
+}
+
+#dy-al .dot.off {
+  background: #f50b0b;
+  box-shadow: 0 0 0 3px rgba(107, 114, 128, .12);
+}
     .head b{margin-left:8px;font-weight:400;opacity:.45;font-size:13px}
     .head u{margin-left:auto;padding:1.5px 7px;border-radius:6px;background:rgba(255,255,255,.09);text-decoration:none;font-size:11px;opacity:.85}
     .head u:hover{background:rgba(255,255,255,.16)}
