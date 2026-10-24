@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         抖音推荐流 · 自动点赞（Z 键通道）
-// @version      1.6.4
+// @version      1.6.5
 // @description  至少播放 3 秒，再结合视频时长随机等待；暂停或缓冲时冻结剩余时间，恢复后继续。
 // @author       阿鲲
 // @match        https://www.douyin.com/*
@@ -302,7 +302,7 @@ panel.innerHTML = `
     <div class="row"><span>本视频</span><b data-f="now">未赞</b></div>
     <div class="row"><span>播放倒计时</span><b data-f="countdown">等待视频</b></div>
     <div class="row" data-f="whyRow" style="display:none"><span>提示</span><b data-f="why"></b></div>
-    <div class="tip">Alt+Z 暂停 / 继续</div>
+    <div class="tip">TIP: 快捷键 Alt+Z 暂停 / 继续</div>
   </div>`;
 document.body.appendChild(panel);
 
