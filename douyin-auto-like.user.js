@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         抖音推荐流 · 自动点赞（Z 键通道）
-// @version      1.6.7
+// @version      1.6.5
 // @description  至少播放 3 秒，再结合视频时长随机等待；暂停或缓冲时冻结剩余时间，恢复后继续。
 // @author       阿鲲
-// @match        https://www.douyin.com/?recommend=1
+// @match        https://www.douyin.com/*
 // @grant        GM_registerMenuCommand
 // @grant        GM_setValue
 // @grant        GM_getValue
