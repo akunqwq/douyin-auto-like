@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         抖音自动点赞（Z 键通道）
-// @version      1.7.0
+// @version      1.7.2
 // @description  支持实时监测视频播放状态，自动点赞未点赞视频，支持跨日统计和导出今日数据。
 // @author       阿鲲
 // @match        https://www.douyin.com/*
@@ -18,10 +18,15 @@
 
   /* ============ 可调参数 ============ */
   const CFG = {
-    pollMs: 300   // 状态检测间隔（毫秒）
+    pollMs: 300,    // 状态检测间隔（毫秒）
+    settleMs: 500   // 切换视频后的 DOM 静置期（毫秒），跨越 data-e2e-state 的滞后窗口
   };
 
   let running = true; // 运行状态开关
+
+  // 状态机全局变量
+  let lastVid = '';
+  let switchAt = 0;
 
   /* ============ 跨日持久化与状态机初始化 ============ */
   const todayStr = new Date().toISOString().slice(0, 10);
@@ -82,9 +87,24 @@
     const modalActive = document.querySelector('[role="dialog"] [data-e2e="feed-active-video"], .video-detail-modal [data-e2e="feed-active-video"], #sliderVideo');
     if (modalActive) {
       const v = modalActive.querySelector('video');
-      const vid = modalActive.getAttribute('data-e2e-vid') || (v ? v.getAttribute('data-e2e-vid') : '');
-      if (v) return { container: modalActive, video: v, vid: vid || 'modal_' + Math.random() };
+      if (v) {
+        // 依次尝试：容器 vid -> video 上的 vid -> video-info 的 aweme-id -> URL 的 modal_id
+        let vid = modalActive.getAttribute('data-e2e-vid') || v.getAttribute('data-e2e-vid') || '';
+
+        if (!vid) {
+          const info = document.querySelector('[data-e2e="video-info"]');
+          if (info) vid = info.getAttribute('data-e2e-aweme-id') || '';
+        }
+        if (!vid) {
+          const m = location.href.match(/modal_id=(\d+)/);
+          if (m) vid = m[1];
+        }
+
+        // 拿不到真实 ID 就返回 null 等待，绝不用随机值制造垃圾记录
+        return vid ? { container: modalActive, video: v, vid } : null;
+      }
     }
+
 
     const active = document.querySelector('[data-e2e="feed-active-video"]');
     if (!active) return null;
@@ -191,7 +211,21 @@
     }
 
     const rec = records[vid];
+
+    // 追踪 vid 变化：即时切换时 data-e2e-vid 先变，点赞按钮的 data-e2e-state 后变
+    if (vid !== lastVid) {
+      lastVid = vid;
+      switchAt = Date.now();
+    }
+
+    // 静置期：滞后窗口内读到的 currentlyLiked 属于上一个视频，一律不采信
+    if (Date.now() - switchAt < CFG.settleMs) {
+      setStatus('状态同步中…', '#f5a623');
+      return;
+    }
+
     const currentlyLiked = isLiked(container, v);
+
 
     // 1. 当用户手动取消点赞 (!currentlyLiked) -> 降级为 UNLIKED，扣除计数
     if (rec.status === 'LIKED' && !currentlyLiked) {
