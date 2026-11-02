@@ -1,44 +1,65 @@
 # 抖音自动点赞
 
-一个用于网页版抖音的 Tampermonkey 用户脚本，通过模拟快捷键减少手动点赞操作，并自动跳过已点赞的视频。
+一个用于网页版抖音的 Tampermonkey 用户脚本，视频播放后延迟 10 秒，通过 Z 键通道自动点赞，并自动跳过已点赞的视频。
 
 ## 特性
 
 - 自动点赞当前正在观看的未点赞视频，覆盖推荐流、搜索结果、精选、播放页等页面。
+- 延迟 10 秒再点赞：刷到不喜欢的视频可以直接划走，不会立刻被点赞。
 - 已点赞的视频直接跳过（`data-e2e-state` 确认为已赞），不会误取消赞。
-- 每个视频只处理一次：与上一个视频相同、或命中今日历史记录的，自动忽略。
-- 通过模拟快捷键（Z）在浏览器端触发交互，不直接请求抖音接口。
-- 刷到即赞，无额外等待。
-- 可将今日刷到并点赞过的视频导出为 JSON，方便回看。
+- 通过 Z 键事件触发点赞，与抖音页面自身的快捷键通道一致；结果由 `data-e2e-state` 迁移确认，只认这一个权威信号。
+- 检测到手动取消点赞后不再干预该视频；滑走再滑回视为新的观看过程。
+- 本次运行内每个视频只处理一次（刷新页面后重置）。
+- 可将今日刷到的视频 ID 导出为 JSON，方便回看。
 
 
 ## 导出今日记录
 
-Tampermonkey 菜单 →「导出今日记录 (JSON)」，会下载 `dy-auto-like-YYYY-MM-DD.json`，内容形如：
+Tampermonkey 菜单 →「导出今日刷视频数据」，会下载 `douyin_video_ids_YYYY-MM-DD.json`，内容形如：
 
 ```json
 {
-  "date": "2026-10-27",
-  "exportedAt": "2026-10-27 21:30:11",
+  "date": "2026-11-02",
   "total": 2,
-  "videos": [
-    {
-      "index": 1,
-      "time": "21:12:03",
-      "id": "7xxxxxxxxxxxxxxxxxx",
-      "url": "https://www.douyin.com/video/7xxxxxxxxxxxxxxxxxx"
-    },
-    {
-      "index": 2,
-      "time": "21:15:48",
-      "id": "7yyyyyyyyyyyyyyyyyy",
-      "url": "https://www.douyin.com/video/7yyyyyyyyyyyyyyyyyy"
-    }
+  "ids": [
+    "7xxxxxxxxxxxxxxxxxx",
+    "7yyyyyyyyyyyyyyyyyy"
   ]
 }
 ```
 
-`id` 取自 `feed-active-video` 上的 `data-e2e-vid`，取不到时依次使用 `video-info` 上的 `data-e2e-aweme-id` 和 URL 上的 `modal_id`；`url` 可直接打开对应视频。记录按天保存，跨天自动清零。
+`id` 唯一取自视频自身祖先链上的 `data-e2e-vid`（通常落在 `feed-active-video` 或弹层容器上）。记录按天保存，跨天自动清零。
+
+## 计数口径与手动取消点赞
+
+面板上的「今日累计刷视频 N」统计的是**今日被脚本识别为当前观看对象的视频数量**，与是否点赞无关。
+
+- 检测到你在当前视频上手动取消点赞后，脚本不再对这个视频发出点赞，直到你滑走再滑回（视为新的观看过程）。
+- 取消后脚本不会自动补赞，避免与你的手动操作来回对抗。
+
+## 实现要点
+
+### 识别：多级证据解析器，而不是页面嗅探
+
+`getCurrentVideo()` 按证据可信度降序尝试三层 resolver：
+
+1. **平台标记**——抖音用 `feed-active-video` 自行标记当前视频。精选弹层页上平台会同时标记背景视频和弹层视频，靠"在播优先 + 可见面积"裁决。
+2. **URL 匹配**——`modal_id` 与 DOM 节点 vid 精确一致时采信；dialog 中的候选还要求与 `modal_id` 身份一致，不一致即放弃。
+3. **属性启发**——可见 + 在播 + 操作栏佐证，用于兜底。
+
+身份纪律：视频 ID 只出自平台 DOM 标记（视频自身祖先的 `data-e2e-vid`）。`modal_id` 是 URL 上的身份标识，只用于精确匹配与一致性校验，**不参与 ID 生成或兜底**——resolver 只寻找两种身份的对应关系，不人为制造对应关系。
+
+### 预览视频守卫
+
+浏览页 hover 预览视频可能"在播 + 大尺寸"，仅靠 vid 祖先可能误判为当前视频。兜底路径要求容器内存在操作栏元素（`video-play-more`，实测：播放态容器有、预览容器无）才采信。
+
+### 触发：延迟 + 到点重校验
+
+排程时不置"已触发"，10 秒计时器到点才重新校验：仍是同一视频、脚本仍在运行、视频仍在播放、仍未点赞，任一不满足即放弃。Z 键发出后点赞是否真正生效，由 `data-e2e-state` 从未赞到已赞的迁移确认；"未生效"与"用户取消"的区分靠 `autoLikeRequested / autoLiked` 状态机，而不是回读时序猜测。
+
+### 人工否决规则：仅当前停留生效
+
+手动取消点赞只否决当前这次停留。滑走后旧会话（含计时器、否决标记）被清理，滑回同一视频视为新观看，允许重新排程点赞。
 
 ## 界面预览
 
@@ -79,7 +100,7 @@ Tampermonkey 菜单 →「导出今日记录 (JSON)」，会下载 `dy-auto-like
 - 抖音精选页的活动项位于 `[data-e2e="slideList"]` 内。
 - 点赞按钮为 `[data-e2e="video-player-digg"]`，未赞 `data-e2e-state="video-player-no-digged"`，已赞 `data-e2e-state="video-player-is-digged"`。已赞时按钮会额外带上构建生成的 class（如 `Fw5w6T_O`），会随发版变化，不可用于判断。
 - 播放器 class 不可靠：暂停时 `xgplayer-playing` 依然存在，会与 `xgplayer-pause`、`xgplayer-inactive` 同时出现，不能作为「正在播放」的依据。
-- 视频 id 的备用来源：`[data-e2e="video-info"]` 上的 `data-e2e-aweme-id`，以及 URL 上的 `modal_id`。
+- 曾考虑 `[data-e2e="video-info"]` 的 `data-e2e-aweme-id` 与 URL `modal_id` 作为视频 id 的备用来源，已否决：id 只出自视频祖先链的 `data-e2e-vid`，modal_id 仅用于匹配与一致性校验。理由：防止 URL 身份与 DOM 身份错配，宁可不点、不可错点。
 - 进入小窗后，该容器在小窗文档中不存在，视频位于 `xg-video-container` 内。
 - 正常推荐流与小窗中观察到相同的 `data-xgplayerid`、`blob:` 媒体地址和视频时长。这些现象提示播放器或媒体状态可能具有连续性，但尚不足以证明底层播放器实例始终相同。
 - 当前小窗文档中没有脚本的悬浮面板。现有脚本使用的 `@match https://www.douyin.com/*` 不匹配 `about:blank`，因此不能假定脚本会自动在小窗中运行。
