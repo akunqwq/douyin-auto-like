@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         抖音自动点赞
-// @version      2.1.0
-// @description  视频播放后延迟 10 秒通过 Z 键通道自动点赞，跟踪点赞状态与手动取消。
+// @version      2.2.0
+// @description  视频播放后延迟点赞（默认 10 秒，不足 10 秒的短视频降至 3 秒），通过 Z 键通道自动点赞，跟踪点赞状态与手动取消。
 // @author       阿鲲
 // @match        https://www.douyin.com/*
 // @grant        GM_registerMenuCommand
@@ -36,6 +36,10 @@
 
   // 自动点赞延迟，单位毫秒。
   const LIKE_DELAY = 10_000; // 数字分隔符（ES2021 引入的语法）
+
+  // 短视频（时长不足 LIKE_DELAY）的点赞延迟。默认阈值 10s 对短
+  // 视频意味着"播完也没点到"，降至 3s 让点赞有机会生效。
+  const LIKE_DELAY_SHORT = 3_000;
 
   let running = true;
   let destroyed = false;
@@ -680,9 +684,18 @@
     }
 
     // 未点赞：延迟一段时间后自动点赞，给用户留出判断时间。
-    session.pendingTimer = setTimeout(() => fireAutoLike(id), LIKE_DELAY);
+    // 视频时长不足默认阈值时降至短视频阈值，否则短视频播完
+    // 计时器仍未到点，永远轮不到点赞。
+    // duration 为 NaN（元数据未就绪）或 Infinity（直播流）时
+    // 比较结果为 false，回落默认阈值，语义自动正确。
+    const delay =
+      video.duration > 0 && video.duration < LIKE_DELAY / 1000
+        ? LIKE_DELAY_SHORT
+        : LIKE_DELAY;
 
-    setStatus(`视频 ${id}：${LIKE_DELAY / 1000} 秒后自动点赞`);
+    session.pendingTimer = setTimeout(() => fireAutoLike(id), delay);
+
+    setStatus(`视频 ${id}：${delay / 1000} 秒后自动点赞`);
   }
 
   // 调度处理函数，避免重复调度。
