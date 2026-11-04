@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         抖音自动点赞
-// @version      2.3.0
+// @version      2.3.1
 // @description  视频播放后延迟点赞（默认 10 秒，不足 10 秒的短视频降至 3 秒），通过 Z 键通道自动点赞，跟踪点赞状态与手动取消。
 // @author       阿鲲
 // @match        https://www.douyin.com/*
@@ -938,14 +938,25 @@
   }
 
   /*
-   * 头部按压同时承担两种操作：位移超过 DRAG_THRESHOLD 视为拖拽并
-   * 取消长按计时；静止按住 LONG_PRESS_MS 视为长按。悬浮入口靠长按
-   * 展开完整面板，完整面板没有展开按钮（X 只负责收起）。
+   * 手势状态机：pointerdown 记录坐标并启动 500ms 计时，此后拖拽
+   * （位移 > 5px）与长按（静止满 500ms）竞争，只有一个动作胜出：
+   * - 拖拽胜出：取消计时器，进入拖拽状态；
+   * - 长按胜出：计时器到点，展开完整面板（仅入口态有意义）；
+   * - pointerup / pointercancel 提前结束：清理计时器，两个动作都不执行。
+   * 悬浮入口靠长按展开，完整面板没有展开按钮（X 只负责收起）。
    */
   const LONG_PRESS_MS = 500;
   const DRAG_THRESHOLD = 5;
 
   let press = null;
+
+  function resetPress() {
+    if (!press) return;
+
+    clearTimeout(press.timer);
+
+    press = null;
+  }
 
   function setCollapsed(value) {
     collapsed = value;
@@ -963,12 +974,14 @@
     const rect = panel.getBoundingClientRect();
 
     press = {
+      pointerId: event.pointerId,
       x: event.clientX,
       y: event.clientY,
       left: rect.left,
       top: rect.top,
       moved: false,
       timer: setTimeout(() => {
+        // 长按胜出。press 置空后 pointerup 不会再做任何清理。
         press = null;
 
         if (collapsed) {
@@ -980,8 +993,8 @@
     event.preventDefault();
   }
 
-  function onMouseMove(event) {
-    if (!press) return;
+  function onPointerMove(event) {
+    if (!press || event.pointerId !== press.pointerId) return;
 
     if (!press.moved) {
       const dx = event.clientX - press.x;
@@ -989,6 +1002,7 @@
 
       if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
 
+      // 拖拽胜出，长按计时作废。
       press.moved = true;
 
       clearTimeout(press.timer);
@@ -1002,21 +1016,28 @@
     panel.style.bottom = "auto";
   }
 
-  function onMouseUp() {
-    if (!press) return;
+  function onPointerUp(event) {
+    if (!press || event.pointerId !== press.pointerId) return;
 
-    clearTimeout(press.timer);
+    // 提前松开：两个动作都不执行。
+    resetPress();
+  }
 
-    press = null;
+  function onPointerCancel(event) {
+    if (!press || event.pointerId !== press.pointerId) return;
+
+    // 浏览器接管手势（如触发滚动）：与提前松开同处理。
+    resetPress();
   }
 
   toggleEl.addEventListener("change", onToggle);
 
   $("#dy-close").addEventListener("click", () => setCollapsed(true));
-  $("#dy-header").addEventListener("mousedown", onHeaderDown);
+  $("#dy-header").addEventListener("pointerdown", onHeaderDown);
 
-  document.addEventListener("mousemove", onMouseMove);
-  document.addEventListener("mouseup", onMouseUp);
+  document.addEventListener("pointermove", onPointerMove);
+  document.addEventListener("pointerup", onPointerUp);
+  document.addEventListener("pointercancel", onPointerCancel);
 
   /* ==================== 启动 ==================== */
 
