@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         抖音自动点赞
-// @version      2.2.0
+// @version      2.3.0
 // @description  视频播放后延迟点赞（默认 10 秒，不足 10 秒的短视频降至 3 秒），通过 Z 键通道自动点赞，跟踪点赞状态与手动取消。
 // @author       阿鲲
 // @match        https://www.douyin.com/*
@@ -42,13 +42,12 @@
   const LIKE_DELAY_SHORT = 3_000;
 
   let running = true;
-  let destroyed = false;
   let structureObserver = null;
   let stateObserver = null;
   let frame = 0;
   let session = null;
-  let collapsed = false;
-  let drag = null;
+  // 默认收起为悬浮入口，完整面板由入口长按展开。
+  let collapsed = true;
   let manualAction = null;
 
   // 已触发点赞的视频ID
@@ -86,7 +85,6 @@
 
   // 保存记录
   function saveRecords() {
-    if (destroyed) return;
     rolloverIfNeeded();
     GM_setValue(STORAGE_KEY, {
       date: today,
@@ -249,8 +247,7 @@
       transform: translateX(18px);
     }
 
-    #dy-close,
-    #dy-collapse {
+    #dy-close {
       cursor: pointer;
       opacity: .7;
     }
@@ -262,7 +259,6 @@
     <div id="dy-header">
       <span id="dy-dot"></span>
       <span id="dy-title">抖音自动点赞</span>
-      <span id="dy-collapse">▾</span>
       <span id="dy-close">✕</span>
     </div>
 
@@ -283,6 +279,9 @@
 
   document.body.appendChild(panel);
 
+  // 初始即为悬浮入口形态。
+  panel.classList.add("collapsed");
+
   const $ = (selector) => panel.querySelector(selector);
   const statusEl = $("#dy-status");
   const videoIdEl = $("#dy-video");
@@ -290,14 +289,11 @@
   const titleEl = $("#dy-title");
   const dotEl = $("#dy-dot");
   const toggleEl = $("#dy-toggle");
-  const collapseEl = $("#dy-collapse");
 
   let lastStatus = "";
   let lastColor = "";
 
   function setStatus(message, color = "#f5a623") {
-    if (destroyed) return;
-
     if (message === lastStatus && color === lastColor) {
       return;
     }
@@ -310,8 +306,6 @@
   }
 
   function updateUI() {
-    if (destroyed) return;
-
     dotEl.style.background = running ? "#2ecc71" : "#ff4d4f";
 
     toggleEl.checked = running;
@@ -600,7 +594,7 @@
 
     session.pendingTimer = null;
 
-    if (destroyed || !running || session.cancelled || session.triggered) {
+    if (!running || session.cancelled || session.triggered) {
       return;
     }
 
@@ -627,8 +621,6 @@
   /* ==================== 核心处理 ==================== */
 
   function process() {
-    if (destroyed) return;
-
     if (!running) {
       setStatus("自动点赞已停止", "#999");
       return;
@@ -700,7 +692,7 @@
 
   // 调度处理函数，避免重复调度。
   function scheduleProcess() {
-    if (destroyed || frame) return;
+    if (frame) return;
 
     frame = requestAnimationFrame(() => {
       frame = 0;
@@ -842,8 +834,6 @@
 
   // 结构变化：视频切换、弹层打开关闭、DOM 节点增删等。
   structureObserver = new MutationObserver((mutations) => {
-    if (destroyed) return;
-
     if (
       mutations.some((mutation) => !isPanelNode(getMutationTarget(mutation)))
     ) {
@@ -863,8 +853,6 @@
    */
 
   stateObserver = new MutationObserver((mutations) => {
-    if (destroyed) return;
-
     let shouldProcess = false;
 
     for (const mutation of mutations) {
@@ -949,106 +937,83 @@
     process();
   }
 
-  function onCollapse() {
-    collapsed = !collapsed;
+  /*
+   * 头部按压同时承担两种操作：位移超过 DRAG_THRESHOLD 视为拖拽并
+   * 取消长按计时；静止按住 LONG_PRESS_MS 视为长按。悬浮入口靠长按
+   * 展开完整面板，完整面板没有展开按钮（X 只负责收起）。
+   */
+  const LONG_PRESS_MS = 500;
+  const DRAG_THRESHOLD = 5;
+
+  let press = null;
+
+  function setCollapsed(value) {
+    collapsed = value;
 
     panel.classList.toggle("collapsed", collapsed);
-    collapseEl.textContent = collapsed ? "▸" : "▾";
 
     updateUI();
   }
 
-  function onMouseDown(event) {
-    if (event.target.closest("#dy-close, #dy-collapse")) {
+  function onHeaderDown(event) {
+    if (event.target.closest("#dy-close")) {
       return;
     }
 
     const rect = panel.getBoundingClientRect();
 
-    drag = {
+    press = {
       x: event.clientX,
       y: event.clientY,
       left: rect.left,
       top: rect.top,
+      moved: false,
+      timer: setTimeout(() => {
+        press = null;
+
+        if (collapsed) {
+          setCollapsed(false);
+        }
+      }, LONG_PRESS_MS),
     };
 
     event.preventDefault();
   }
 
   function onMouseMove(event) {
-    if (!drag || destroyed) return;
+    if (!press) return;
 
-    panel.style.left = `${drag.left + event.clientX - drag.x}px`;
+    if (!press.moved) {
+      const dx = event.clientX - press.x;
+      const dy = event.clientY - press.y;
 
-    panel.style.top = `${drag.top + event.clientY - drag.y}px`;
+      if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+
+      press.moved = true;
+
+      clearTimeout(press.timer);
+    }
+
+    panel.style.left = `${press.left + event.clientX - press.x}px`;
+
+    panel.style.top = `${press.top + event.clientY - press.y}px`;
 
     panel.style.right = "auto";
     panel.style.bottom = "auto";
   }
 
   function onMouseUp() {
-    drag = null;
-  }
+    if (!press) return;
 
-  /* ==================== 清理 ==================== */
+    clearTimeout(press.timer);
 
-  function destroy() {
-    if (destroyed) return;
-
-    destroyed = true;
-
-    if (session?.pendingTimer) {
-      clearTimeout(session.pendingTimer);
-    }
-
-    structureObserver?.disconnect();
-    stateObserver?.disconnect();
-
-    if (frame) {
-      cancelAnimationFrame(frame);
-    }
-
-    for (const [video, handler] of videoListeners) {
-      for (const name of VIDEO_EVENTS) {
-        video.removeEventListener(name, handler);
-      }
-    }
-
-    videoListeners.clear();
-
-    if (history.pushState === wrappedPushState) {
-      history.pushState = originalPushState;
-    }
-
-    if (history.replaceState === wrappedReplaceState) {
-      history.replaceState = originalReplaceState;
-    }
-
-    window.removeEventListener("popstate", onRouteChange);
-
-    document.removeEventListener("visibilitychange", onVisibilityChange);
-
-    document.removeEventListener("pointerdown", markManualAction, true);
-
-    document.removeEventListener("keydown", markManualAction, true);
-
-    toggleEl.removeEventListener("change", onToggle);
-    collapseEl.removeEventListener("click", onCollapse);
-
-    $("#dy-close").removeEventListener("click", destroy);
-    $("#dy-header").removeEventListener("mousedown", onMouseDown);
-
-    document.removeEventListener("mousemove", onMouseMove);
-    document.removeEventListener("mouseup", onMouseUp);
-
-    panel.remove();
+    press = null;
   }
 
   toggleEl.addEventListener("change", onToggle);
-  collapseEl.addEventListener("click", onCollapse);
 
-  $("#dy-close").addEventListener("click", destroy);
-  $("#dy-header").addEventListener("mousedown", onMouseDown);
+  $("#dy-close").addEventListener("click", () => setCollapsed(true));
+  $("#dy-header").addEventListener("mousedown", onHeaderDown);
 
   document.addEventListener("mousemove", onMouseMove);
   document.addEventListener("mouseup", onMouseUp);
