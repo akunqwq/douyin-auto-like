@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         抖音自动点赞
-// @version      2.3.2
-// @description  视频播放后延迟点赞（默认 10 秒，不足 10 秒的短视频降至 3 秒），通过 Z 键通道自动点赞，跟踪点赞状态与手动取消。
+// @version      2.4.0
+// @description  视频播放后延迟点赞（默认 10 秒，不足 10 秒的短视频降至 3 秒），通过 Z 键通道自动点赞，跟踪点赞状态与手动取消；另附独立播放定时器，到点暂停当前视频。
 // @author       阿鲲
 // @match        https://www.douyin.com/*
 // @grant        GM_registerMenuCommand
@@ -251,6 +251,8 @@
       cursor: pointer;
       opacity: .7;
     }
+
+    /* 播放定时器控件外观由使用者补充，此处不预置取值 */
   `);
 
   const panel = document.createElement("div");
@@ -274,6 +276,22 @@
           <span class="dy-slider"></span>
         </label>
       </div>
+
+      <div class="dy-row">
+        <span>播放定时</span>
+        <select id="dy-timer-duration">
+          <option value="10">10 分钟</option>
+          <option value="15">15 分钟</option>
+          <option value="30">30 分钟</option>
+          <option value="45">45 分钟</option>
+          <option value="60">1 小时</option>
+        </select>
+      </div>
+
+      <div class="dy-row">
+        <span id="dy-timer-status">未启动</span>
+        <button id="dy-timer-toggle" type="button">启动</button>
+      </div>
     </div>
   `;
 
@@ -289,6 +307,9 @@
   const titleEl = $("#dy-title");
   const dotEl = $("#dy-dot");
   const toggleEl = $("#dy-toggle");
+  const timerDurationEl = $("#dy-timer-duration");
+  const timerToggleEl = $("#dy-timer-toggle");
+  const timerStatusEl = $("#dy-timer-status");
 
   let lastStatus = "";
   let lastColor = "";
@@ -801,7 +822,7 @@
       return;
     }
 
-    // 用户主动取消点赞。
+    // 人工主动取消点赞。
     if (
       oldState === STATE_LIKED &&
       newState === STATE_UNLIKED &&
@@ -815,9 +836,7 @@
       session.autoLiked = false;
 
       likedIds.delete(ctx.id);
-
-      // 人工否决规则：当前视频停留生效。移出已触发集合，
-      // 滑走再滑回视为新观看，允许重新排程点赞。
+      // 滑走再滑回视为新观看，取消点赞后仍然可以重新触发自动点赞。
       triggeredIds.delete(ctx.id);
 
       manualAction = null;
@@ -850,11 +869,6 @@
     subtree: true,
   });
 
-  /*
-   * 属性变化：点赞状态迁移需要旧值比对，e2e 标记
-   * 变化需要重新识别当前视频，二者都依赖
-   * attributeOldValue，因此与结构监听分设两个 observer。
-   */
 
   stateObserver = new MutationObserver((mutations) => {
     let shouldProcess = false;
@@ -953,6 +967,96 @@
 
   document.addEventListener("visibilitychange", onVisibilityChange);
 
+  /*
+   * 播放定时器：到点暂停当前视频，避免刷视频过久。
+   * 后台冻结期间不消耗等待进度，回前台按剩余时间续跑。
+   */
+  let playbackEndAt = 0;
+  let playbackTimeoutId = null;
+  let playbackTickId = null;
+
+  const PLAYBACK_TICK_MS = 1000;
+
+  function playbackRemainingMs() {
+    return playbackEndAt === 0 ? 0 : Math.max(0, playbackEndAt - Date.now());
+  }
+
+  function formatRemaining(ms) {
+    const total = Math.ceil(ms / 1000);
+    const minutes = Math.floor(total / 60);
+    const seconds = total % 60;
+
+    return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+
+  function setTimerStatus(message) {
+    timerStatusEl.textContent = message;
+  }
+
+  function updateTimerUI() {
+    const active = playbackEndAt !== 0;
+
+    timerToggleEl.textContent = active ? "取消" : "启动";
+    timerDurationEl.disabled = active;
+  }
+
+  function stopPlaybackTimer() {
+    clearTimeout(playbackTimeoutId);
+    clearInterval(playbackTickId);
+
+    playbackTimeoutId = null;
+    playbackTickId = null;
+    playbackEndAt = 0;
+  }
+
+  function startPlaybackTimer(minutes) {
+    stopPlaybackTimer();
+
+    playbackEndAt = Date.now() + minutes * 60_000;
+    playbackTimeoutId = setTimeout(finishPlaybackTimer, playbackRemainingMs());
+    playbackTickId = setInterval(onPlaybackTick, PLAYBACK_TICK_MS);
+
+    updateTimerUI();
+    onPlaybackTick();
+  }
+
+  function onPlaybackTick() {
+    if (playbackEndAt === 0) return;
+
+    const ms = playbackRemainingMs();
+
+    setTimerStatus(ms === 0 ? "正在暂停…" : `剩余 ${formatRemaining(ms)}`);
+  }
+
+  function finishPlaybackTimer() {
+    if (playbackEndAt === 0) return;
+
+    stopPlaybackTimer();
+    updateTimerUI();
+
+    const ctx = getCurrentVideo();
+
+    if (!ctx) {
+      setTimerStatus("未能定位当前视频");
+      return;
+    }
+
+    ctx.video.pause();
+    setTimerStatus("定时结束");
+  }
+
+  function onPlaybackVisible() {
+    if (document.hidden || playbackEndAt === 0) return;
+
+    if (playbackRemainingMs() === 0) {
+      finishPlaybackTimer();
+    } else {
+      onPlaybackTick();
+    }
+  }
+
+  document.addEventListener("visibilitychange", onPlaybackVisible);
+
   /* ==================== 面板交互 ==================== */
 
   function onToggle() {
@@ -967,14 +1071,6 @@
     process();
   }
 
-  /*
-   * 手势状态机：pointerdown 记录坐标并启动 500ms 计时，此后拖拽
-   * （位移 > 5px）与长按（静止满 500ms）竞争，只有一个动作胜出：
-   * - 拖拽胜出：取消计时器，进入拖拽状态；
-   * - 长按胜出：计时器到点，展开完整面板（仅入口态有意义）；
-   * - pointerup / pointercancel 提前结束：清理计时器，两个动作都不执行。
-   * 悬浮入口靠长按展开，完整面板没有展开按钮（X 只负责收起）。
-   */
   const LONG_PRESS_MS = 500;
   const DRAG_THRESHOLD = 5;
 
@@ -1032,7 +1128,6 @@
 
       if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
 
-      // 拖拽胜出，长按计时作废。
       press.moved = true;
 
       clearTimeout(press.timer);
@@ -1048,19 +1143,26 @@
 
   function onPointerUp(event) {
     if (!press || event.pointerId !== press.pointerId) return;
-
-    // 提前松开：两个动作都不执行。
     resetPress();
   }
 
   function onPointerCancel(event) {
     if (!press || event.pointerId !== press.pointerId) return;
-
-    // 浏览器接管手势（如触发滚动）：与提前松开同处理。
     resetPress();
   }
 
   toggleEl.addEventListener("change", onToggle);
+
+  timerToggleEl.addEventListener("click", () => {
+    if (playbackEndAt !== 0) {
+      stopPlaybackTimer();
+      updateTimerUI();
+      setTimerStatus("已取消");
+      return;
+    }
+
+    startPlaybackTimer(Number(timerDurationEl.value));
+  });
 
   $("#dy-close").addEventListener("click", () => setCollapsed(true));
   $("#dy-header").addEventListener("pointerdown", onHeaderDown);
