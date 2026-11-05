@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         抖音自动点赞
-// @version      2.3.1
+// @version      2.3.2
 // @description  视频播放后延迟点赞（默认 10 秒，不足 10 秒的短视频降至 3 秒），通过 Z 键通道自动点赞，跟踪点赞状态与手动取消。
 // @author       阿鲲
 // @match        https://www.douyin.com/*
@@ -582,6 +582,8 @@
       autoLikeRequested: false,
       autoLiked: false,
       pendingTimer: null,
+      // 后台冻结时计时器被清空，剩余毫秒记在这里，回前台续跑。
+      frozenRemaining: null,
     };
 
     manualAction = null;
@@ -654,7 +656,8 @@
     }
 
     // 延迟点赞，给用户留出判断时间。
-    if (session.pendingTimer) {
+    // 计时器存活或处于后台冻结态时都不重新排程。
+    if (session.pendingTimer || session.frozenRemaining) {
       return;
     }
 
@@ -685,6 +688,7 @@
         ? LIKE_DELAY_SHORT
         : LIKE_DELAY;
 
+    session.pendingUntil = Date.now() + delay;
     session.pendingTimer = setTimeout(() => fireAutoLike(id), delay);
 
     setStatus(`视频 ${id}：${delay / 1000} 秒后自动点赞`);
@@ -915,10 +919,36 @@
 
   window.addEventListener("popstate", onRouteChange);
 
+  /*
+   * 后台冻结倒计时：标签页隐藏时清掉待触发计时器并记下剩余毫秒，
+   * 回前台用剩余时间重排——切后台期间不消耗等待进度，也不点赞。
+   */
   function onVisibilityChange() {
-    if (!document.hidden) {
-      process();
+    if (document.hidden) {
+      if (session?.pendingTimer) {
+        clearTimeout(session.pendingTimer);
+
+        session.pendingTimer = null;
+        session.frozenRemaining = Math.max(
+          0,
+          session.pendingUntil - Date.now()
+        );
+      }
+
+      return;
     }
+
+    if (session?.frozenRemaining) {
+      session.pendingUntil = Date.now() + session.frozenRemaining;
+      session.pendingTimer = setTimeout(
+        () => fireAutoLike(session.id),
+        session.frozenRemaining
+      );
+
+      session.frozenRemaining = null;
+    }
+
+    process();
   }
 
   document.addEventListener("visibilitychange", onVisibilityChange);
