@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         抖音自动点赞
-// @version      2.4.1
+// @version      2.5.0
 // @description  视频播放后延迟点赞（默认 10 秒，不足 10 秒的短视频降至 3 秒），通过 Z 键通道自动点赞，跟踪点赞状态与手动取消；另附独立睡眠定时功能，可在设定时间后暂停当前视频，避免刷视频过久。
 // @author       阿鲲
 // @match        https://www.douyin.com/*
@@ -274,18 +274,37 @@
 
       <div class="dy-row">
         <span>睡眠定时</span>
-        <select id="dy-timer-duration">
-          <option value="10">10 分钟</option>
-          <option value="15">15 分钟</option>
-          <option value="30">30 分钟</option>
-          <option value="45">45 分钟</option>
-          <option value="60">1 小时</option>
-        </select>
       </div>
+
+      <fieldset id="dy-timer-controls">
+        <div class="dy-row">
+          <button type="button" data-minutes="10">10 分钟</button>
+          <button type="button" data-minutes="15">15 分钟</button>
+          <button type="button" data-minutes="30">30 分钟</button>
+        </div>
+
+        <div class="dy-row">
+          <button type="button" data-minutes="45">45 分钟</button>
+          <button type="button" data-minutes="60">1 小时</button>
+          <button type="button" data-minutes="120">2 小时</button>
+        </div>
+
+        <div class="dy-row">
+          <input id="dy-timer-hours" type="number" min="0" value="0">
+          <span>小时</span>
+          <span>:</span>
+          <input id="dy-timer-minutes" type="number" min="0" value="0">
+          <span>分钟</span>
+        </div>
+
+        <div class="dy-row">
+          <button id="dy-timer-custom" type="button">自定义时长</button>
+        </div>
+      </fieldset>
 
       <div class="dy-row">
         <span id="dy-timer-status">未启动</span>
-        <button id="dy-timer-toggle" type="button">启动</button>
+        <button id="dy-timer-toggle" type="button" hidden>取消</button>
       </div>
     </div>
   `;
@@ -302,8 +321,11 @@
   const titleEl = $("#dy-title");
   const dotEl = $("#dy-dot");
   const toggleEl = $("#dy-toggle");
-  const timerDurationEl = $("#dy-timer-duration");
-  const timerToggleEl = $("#dy-timer-toggle");
+  const timerControlsEl = $("#dy-timer-controls");
+  const timerHoursEl = $("#dy-timer-hours");
+  const timerMinutesEl = $("#dy-timer-minutes");
+  const timerCustomEl = $("#dy-timer-custom");
+  const timerCancelEl = $("#dy-timer-toggle");
   const timerStatusEl = $("#dy-timer-status");
 
   let lastStatus = "";
@@ -442,9 +464,6 @@
     return Array.from(root.querySelectorAll("video")).filter(isVisibleVideo);
   }
 
-  // 对候选视频进行筛选，排除缺少必要身份及操作控件的预览视频；
-  // 多个有效候选共存时，按播放状态和可见区域面积进行排序。
-  // 优先选择正在播放的视频，同状态下按可见区域面积降序选择。
   function rankVideos(videos) {
     return videos
       .map((video) => {
@@ -983,8 +1002,19 @@
   function updateTimerUI() {
     const active = playbackEndAt !== 0;
 
-    timerToggleEl.textContent = active ? "取消" : "启动";
-    timerDurationEl.disabled = active;
+    timerControlsEl.disabled = active;
+    timerCancelEl.hidden = !active;
+  }
+
+  // 解析时长输入
+  function parseDuration(hours, minutes) {
+    if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null;
+    if (!Number.isInteger(hours) || !Number.isInteger(minutes)) return null;
+    if (hours < 0 || minutes < 0) return null;
+
+    const total = hours * 60 + minutes;
+
+    return total > 0 ? total : null;
   }
 
   function stopPlaybackTimer() {
@@ -1094,7 +1124,6 @@
       top: rect.top,
       moved: false,
       timer: setTimeout(() => {
-        // 长按胜出。press 置空后 pointerup 不会再做任何清理。
         press = null;
 
         if (collapsed) {
@@ -1140,15 +1169,30 @@
 
   toggleEl.addEventListener("change", onToggle);
 
-  timerToggleEl.addEventListener("click", () => {
-    if (playbackEndAt !== 0) {
-      stopPlaybackTimer();
-      updateTimerUI();
-      setTimerStatus("已取消");
+  timerControlsEl.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-minutes]");
+
+    if (button) startPlaybackTimer(Number(button.dataset.minutes));
+  });
+
+  timerCustomEl.addEventListener("click", () => {
+    const minutes = parseDuration(
+      timerHoursEl.valueAsNumber,
+      timerMinutesEl.valueAsNumber
+    );
+
+    if (minutes === null) {
+      setTimerStatus("请设置大于 0 的时长");
       return;
     }
 
-    startPlaybackTimer(Number(timerDurationEl.value));
+    startPlaybackTimer(minutes);
+  });
+
+  timerCancelEl.addEventListener("click", () => {
+    stopPlaybackTimer();
+    updateTimerUI();
+    setTimerStatus("已取消");
   });
 
   $("#dy-close").addEventListener("click", () => setCollapsed(true));
