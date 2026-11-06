@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         抖音自动点赞
-// @version      2.4.0
-// @description  视频播放后延迟点赞（默认 10 秒，不足 10 秒的短视频降至 3 秒），通过 Z 键通道自动点赞，跟踪点赞状态与手动取消；另附独立播放定时器，到点暂停当前视频。
+// @version      2.4.1
+// @description  视频播放后延迟点赞（默认 10 秒，不足 10 秒的短视频降至 3 秒），通过 Z 键通道自动点赞，跟踪点赞状态与手动取消；另附独立睡眠定时功能，可在设定时间后暂停当前视频，避免刷视频过久。
 // @author       阿鲲
 // @match        https://www.douyin.com/*
 // @grant        GM_registerMenuCommand
@@ -100,8 +100,6 @@
     saveRecords();
     updateUI();
   }
-
-  // 导出刷视频数据 (JSON)
   GM_registerMenuCommand("导出今日刷视频数据", () => {
     rolloverIfNeeded();
 
@@ -127,9 +125,6 @@
     a.click();
     a.remove();
   });
-
-  /* ==================== UI样式 ==================== */
-
   GM_addStyle(`
     #dy-panel {
       position: fixed;
@@ -240,7 +235,7 @@
     }
 
     .dy-switch input:checked + .dy-slider {
-      background: #fe2c55;
+      background: #41ff6a;
     }
 
     .dy-switch input:checked + .dy-slider:before {
@@ -252,7 +247,7 @@
       opacity: .7;
     }
 
-    /* 播放定时器控件外观由使用者补充，此处不预置取值 */
+    /* 睡眠定时器控件外观由使用者补充，此处不预置取值 */
   `);
 
   const panel = document.createElement("div");
@@ -278,7 +273,7 @@
       </div>
 
       <div class="dy-row">
-        <span>播放定时</span>
+        <span>睡眠定时</span>
         <select id="dy-timer-duration">
           <option value="10">10 分钟</option>
           <option value="15">15 分钟</option>
@@ -297,7 +292,7 @@
 
   document.body.appendChild(panel);
 
-  // 初始即为悬浮入口形态。
+  // 默认折叠
   panel.classList.add("collapsed");
 
   const $ = (selector) => panel.querySelector(selector);
@@ -524,7 +519,7 @@
     );
   }
 
-  // 启发式：弹层内的主视频，身份以视频自身为准。
+  // 通过启发式选择当前视频：按播放状态和可见区域面积排序，优先正在播放的视频。
   function resolveHeuristicVideo() {
     for (const video of rankVideos(getVisibleVideoCandidates())) {
       const ctx = getVideoContext(video, true);
@@ -603,7 +598,7 @@
       autoLikeRequested: false,
       autoLiked: false,
       pendingTimer: null,
-      // 后台冻结时计时器被清空，剩余毫秒记在这里，回前台续跑。
+      // 冻结剩余时间
       frozenRemaining: null,
     };
 
@@ -677,7 +672,7 @@
     }
 
     // 延迟点赞，给用户留出判断时间。
-    // 计时器存活或处于后台冻结态时都不重新排程。
+    // 计时器存活或处于后台冻结态时不重排程。
     if (session.pendingTimer || session.frozenRemaining) {
       return;
     }
@@ -698,12 +693,6 @@
       setStatus(`视频 ${id}：已经点赞，跳过`, "#fe2c55");
       return;
     }
-
-    // 未点赞：延迟一段时间后自动点赞，给用户留出判断时间。
-    // 视频时长不足默认阈值时降至短视频阈值，否则短视频播完
-    // 计时器仍未到点，永远轮不到点赞。
-    // duration 为 NaN（元数据未就绪）或 Infinity（直播流）时
-    // 比较结果为 false，回落默认阈值，语义自动正确。
     const delay =
       video.duration > 0 && video.duration < LIKE_DELAY / 1000
         ? LIKE_DELAY_SHORT
@@ -715,7 +704,7 @@
     setStatus(`视频 ${id}：${delay / 1000} 秒后自动点赞`);
   }
 
-  // 调度处理函数，避免重复调度。
+  // 调度处理。
   function scheduleProcess() {
     if (frame) return;
 
@@ -725,12 +714,12 @@
     });
   }
 
-  // 判断节点是否在面板内。
+  // 判断是否是面板节点
   function isPanelNode(node) {
     return Boolean(node && (node === panel || panel.contains(node)));
   }
 
-  /* ==================== 手动取消与点赞状态监听 ==================== */
+  /* ==================== 人工操作的处理 ==================== */
 
   function markManualAction(event) {
     if (!running || !event.isTrusted || !session) {
@@ -805,7 +794,7 @@
       return;
     }
 
-    // 自动点赞成功。
+    // 自动点赞请求成功。
     if (
       oldState === STATE_UNLIKED &&
       newState === STATE_LIKED &&
@@ -822,7 +811,7 @@
       return;
     }
 
-    // 人工主动取消点赞。
+    // 手动取消点赞处理
     if (
       oldState === STATE_LIKED &&
       newState === STATE_UNLIKED &&
@@ -847,7 +836,7 @@
     }
   }
 
-  /* ==================== DOM 结构变化监听 ==================== */
+  /* ==================== DOM 结构变化的处理 ==================== */
 
   function getMutationTarget(mutation) {
     return mutation.target.nodeType === 1
@@ -902,7 +891,7 @@
     attributeFilter: ["data-e2e", "data-e2e-state", "data-e2e-vid"],
   });
 
-  /* ==================== 路由与可见性 ==================== */
+  /* ==================== 路由变化的处理 ==================== */
 
   const originalPushState = history.pushState;
   const originalReplaceState = history.replaceState;
@@ -934,8 +923,7 @@
   window.addEventListener("popstate", onRouteChange);
 
   /*
-   * 后台冻结倒计时：标签页隐藏时清掉待触发计时器并记下剩余毫秒，
-   * 回前台用剩余时间重排——切后台期间不消耗等待进度，也不点赞。
+   * 页面切换时冻结自动点赞，避免功能在后台被节流后消耗资源。
    */
   function onVisibilityChange() {
     if (document.hidden) {
@@ -968,8 +956,7 @@
   document.addEventListener("visibilitychange", onVisibilityChange);
 
   /*
-   * 播放定时器：到点暂停当前视频，避免刷视频过久。
-   * 时间以 endAt 为准，后台不冻结；回前台补判被节流的到期回调。
+   * 睡眠定时功能：设定时间自动暂停当前视频，避免刷视频过久。
    */
   let playbackEndAt = 0;
   let playbackTimeoutId = null;
