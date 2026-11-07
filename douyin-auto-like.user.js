@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         抖音自动点赞
-// @version      2.5.0
+// @version      2.6.6
 // @description  视频播放后延迟点赞（默认 10 秒，不足 10 秒的短视频降至 3 秒），通过 Z 键通道自动点赞，跟踪点赞状态与手动取消；另附独立睡眠定时功能，可在设定时间后暂停当前视频，避免刷视频过久。
 // @author       阿鲲
 // @match        https://www.douyin.com/*
@@ -14,48 +14,50 @@
 (function () {
   "use strict";
 
+  /* ================================================================
+   * §1 CONFIG / UTILS — 全局常量与工具函数
+   * ================================================================ */
 
-  const STORAGE_KEY = "dy_auto_like_data"; // 存储键值
-  const ACTIVE_SELECTOR = '[data-e2e="feed-active-video"][data-e2e-vid]'; // 激活视频选择器
-  const PLAYER_DIGG_SELECTOR = '[data-e2e="video-player-digg"]'; // 播放器点赞选择器
-  const FEED_DIGG_SELECTOR = '[data-e2e="feed-digg"]'; // 视频卡片点赞选择器
-  const LIKE_SELECTOR = `${PLAYER_DIGG_SELECTOR}, ${FEED_DIGG_SELECTOR}`; // 点赞选择器
+  const CONFIG = (() => {
+    const playerDigg = '[data-e2e="video-player-digg"]';
+    const feedDigg = '[data-e2e="feed-digg"]';
 
-  // 点赞状态
-  const STATE_LIKED = "video-player-is-digged";
-  const STATE_UNLIKED = "video-player-no-digged";
+    return {
+      STORAGE_KEY: "dy_auto_like_data",
 
-  // 视频ID正则
-  const VID_PATTERN = /^\d+$/;
 
-  // 视频或弹层小于该尺寸视为预览。
-  const MIN_VISIBLE_SIZE = 100;
+      platform: {
+        activePlayer: '[data-e2e="feed-active-video"][data-e2e-vid]',
+        playerDigg,
+        feedDigg,
+        like: `${playerDigg}, ${feedDigg}`,
+        stateLiked: "video-player-is-digged",
+        stateUnliked: "video-player-no-digged",
+        vidPattern: /^\d+$/,
+        videoEvents: [
+          "playing",
+          "play",
+          "pause",
+          "waiting",
+          "stalled",
+          "ended",
+          "canplay",
+          "loadeddata",
+        ],
+      },
 
-  // 区分"当前播放视频" 和 "预览视频"
-  const CONTROL_SELECTOR = '[data-e2e="video-play-more"]';
+      timing: {
+        likeMs: 10_000,
+        // 默认阈值对短视频意味着「播完也没点到」，降至 3s 让点赞有机会生效。
+        likeShortMs: 3_000,
+        manualActionWindowMs: 2_000,
+        playbackTickMs: 1_000,
+        longPressMs: 500,
+        dragThresholdPx: 5,
+      },
+    };
+  })();
 
-  // 自动点赞延迟，单位毫秒。
-  const LIKE_DELAY = 10_000; // 数字分隔符（ES2021 引入的语法）
-
-  // 短视频（时长不足 LIKE_DELAY）的点赞延迟。默认阈值 10s 对短
-  // 视频意味着"播完也没点到"，降至 3s 让点赞有机会生效。
-  const LIKE_DELAY_SHORT = 3_000;
-
-  let running = true;
-  let structureObserver = null;
-  let stateObserver = null;
-  let frame = 0;
-  let session = null;
-  // 默认收起为悬浮入口，完整面板由入口长按展开。
-  let collapsed = true;
-  let manualAction = null;
-
-  // 已触发点赞的视频ID
-  const triggeredIds = new Set();
-  const likedIds = new Set();
-  const videoListeners = new Map();
-
-  // 格式化日期
   function formatDate(date) {
     return [
       date.getFullYear(),
@@ -64,68 +66,604 @@
     ].join("-");
   }
 
-  let today = formatDate(new Date());
-  // 当前日期，跨日时清空记录
-  function rolloverIfNeeded() {
-    const now = formatDate(new Date());
-    if (now === today) return;
-    today = now;
-    for (const id of Object.keys(records)) {
-      delete records[id];
+  function formatRemaining(ms) {
+    const total = Math.ceil(ms / 1000);
+    const minutes = Math.floor(total / 60);
+    const seconds = total % 60;
+
+    return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+
+  function parseDuration(hours, minutes) {
+    if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null;
+    if (!Number.isInteger(hours) || !Number.isInteger(minutes)) return null;
+    if (hours < 0 || minutes < 0) return null;
+
+    const total = hours * 60 + minutes;
+
+    return total > 0 ? total : null;
+  }
+
+  /* ================================================================
+   * §2 STATE / LIFECYCLE — 全局可变状态与资源句柄
+   * AppState 装业务状态（可重置），Runtime 装需 dispose 的资源，两者清空方式不同。
+   * ================================================================ */
+
+  const AppState = {
+    running: true,
+    // 默认收起
+    collapsed: true,
+
+    session: null,
+    manualAction: null,
+    triggeredIds: new Set(),
+    frame: 0,
+
+    today: formatDate(new Date()),
+    records: Object.create(null),
+
+    lastStatus: "",
+    lastColor: "",
+    press: null,
+
+    timer: {
+      endAt: 0,
+      timeoutId: null,
+      tickId: null,
+    },
+  };
+
+  {
+    const saved = GM_getValue(CONFIG.STORAGE_KEY, null);
+
+    if (
+      saved?.date === AppState.today &&
+      saved.records &&
+      typeof saved.records === "object" &&
+      !Array.isArray(saved.records)
+    ) {
+      for (const [id, viewed] of Object.entries(saved.records)) {
+        if (viewed === true && CONFIG.platform.vidPattern.test(id)) {
+          AppState.records[id] = true;
+        }
+      }
     }
   }
 
-  // 持久化记录
-  const records = Object.create(null);
+  const Runtime = {
+    controller: new AbortController(),
+    observers: [],
+    disposers: [],
+    boundVideos: new WeakSet(),
+    panel: null,
+  };
 
-  // 获取记录数量
-  function getCount() {
-    return Object.keys(records).length;
-  }
-
-  // 保存记录
-  function saveRecords() {
-    rolloverIfNeeded();
-    GM_setValue(STORAGE_KEY, {
-      date: today,
-      records,
+  // 所有 DOM 监听挂同一 signal，卸载时一次 abort 全清；散装 addEventListener 无法批量回收。
+  function on(target, type, handler, options = {}) {
+    target.addEventListener(type, handler, {
+      ...options,
+      signal: Runtime.controller.signal,
     });
   }
 
-  // 读取记录
-  function recordVideo(id) {
-    rolloverIfNeeded();
-    if (records[id]) return;
-    records[id] = true;
-    saveRecords();
-    updateUI();
+  function observe(target, options, callback) {
+    const observer = new MutationObserver(callback);
+    observer.observe(target, options);
+    Runtime.observers.push(observer);
+    return observer;
   }
-  GM_registerMenuCommand("导出今日刷视频数据", () => {
-    rolloverIfNeeded();
 
-    const ids = Object.keys(records);
-    const a = document.createElement("a");
+  function onDispose(fn) {
+    Runtime.disposers.push(fn);
+  }
 
-    a.href =
-      "data:application/json;charset=utf-8," +
-      encodeURIComponent(
-        JSON.stringify(
-          {
-            date: today,
-            total: ids.length,
-            ids,
-          },
-          null,
-          2,
-        ),
+  // 预留后续的「完全卸载」开关；当前不注册入口。
+  function destroy() {
+    Runtime.controller.abort();
+    for (const observer of Runtime.observers) observer.disconnect();
+    for (const dispose of Runtime.disposers) dispose();
+    cancelAnimationFrame(AppState.frame);
+    Runtime.panel?.remove();
+  }
+
+  /* ================================================================
+   * §3 PLATFORM ADAPTER — 唯一读取抖音 DOM 的地方
+   * 纯查询，不写 AppState，不碰 UI，不注册监听。
+   * ================================================================ */
+
+  const Platform = {
+    isPlaying(video) {
+      return (
+        !video.paused &&
+        !video.ended &&
+        video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
+      );
+    },
+
+    findLikeButton(box) {
+      if (!box) return null;
+
+      return (
+        box.querySelector(CONFIG.platform.playerDigg) ||
+        box.querySelector(CONFIG.platform.feedDigg)
+      );
+    },
+
+    getLikeState(button) {
+      if (!button) return "UNKNOWN";
+
+      const state = button.getAttribute("data-e2e-state");
+
+      if (state === CONFIG.platform.stateLiked) return "LIKED";
+      if (state === CONFIG.platform.stateUnliked) return "UNLIKED";
+
+      return "UNKNOWN";
+    },
+
+    getVideoContext(player) {
+      const id = player.getAttribute("data-e2e-vid")?.trim();
+      const video = player.querySelector("video");
+
+      if (!id || !CONFIG.platform.vidPattern.test(id) || !video) {
+        return null;
+      }
+
+      return {
+        id,
+        video,
+        likeButton: Platform.findLikeButton(player),
+      };
+    },
+
+    getModalId() {
+      const id = new URL(location.href).searchParams.get("modal_id");
+
+      return id && CONFIG.platform.vidPattern.test(id) ? id : null;
+    },
+
+    getCurrentVideo() {
+      const player = document.querySelector(CONFIG.platform.activePlayer);
+
+      if (!player) return null;
+
+      const ctx = Platform.getVideoContext(player);
+      if (!ctx) return null;
+
+      const modalId = Platform.getModalId();
+      if (modalId && modalId !== ctx.id) return null;
+
+      return ctx;
+    },
+  };
+
+  /* ================================================================
+   * §4 AUTO LIKE — 自动点赞业务 + 今日记录
+   * 状态输出一律经 UI.*，不直接操作面板节点。
+   * ================================================================ */
+
+  const Records = {
+    rolloverIfNeeded() {
+      const now = formatDate(new Date());
+      if (now === AppState.today) return;
+
+      AppState.today = now;
+
+      for (const id of Object.keys(AppState.records)) {
+        delete AppState.records[id];
+      }
+    },
+
+    getCount() {
+      return Object.keys(AppState.records).length;
+    },
+
+    save() {
+      Records.rolloverIfNeeded();
+      GM_setValue(CONFIG.STORAGE_KEY, {
+        date: AppState.today,
+        records: AppState.records,
+      });
+    },
+
+    record(id) {
+      Records.rolloverIfNeeded();
+      if (AppState.records[id]) return;
+
+      AppState.records[id] = true;
+      Records.save();
+      UI.updateUI();
+    },
+
+    export() {
+      Records.rolloverIfNeeded();
+
+      const ids = Object.keys(AppState.records);
+      const a = document.createElement("a");
+
+      a.href =
+        "data:application/json;charset=utf-8," +
+        encodeURIComponent(
+          JSON.stringify(
+            {
+              date: AppState.today,
+              total: ids.length,
+              ids,
+            },
+            null,
+            2,
+          ),
+        );
+
+      a.download = `douyin_video_ids_${AppState.today}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    },
+
+    registerMenu() {
+      GM_registerMenuCommand("导出今日刷视频数据", Records.export);
+    },
+  };
+
+  const AutoLike = {
+    pressZ() {
+      const options = {
+        key: "z",
+        code: "KeyZ",
+        keyCode: 90,
+        which: 90,
+        bubbles: true,
+        cancelable: true,
+      };
+
+      document.dispatchEvent(new KeyboardEvent("keydown", options));
+      document.dispatchEvent(new KeyboardEvent("keyup", options));
+    },
+
+    attachVideoEvents(video) {
+      if (Runtime.boundVideos.has(video)) return;
+      Runtime.boundVideos.add(video);
+
+      const handler = () => AutoLike.process();
+      for (const name of CONFIG.platform.videoEvents) {
+        on(video, name, handler);
+      }
+    },
+
+    createSession(id) {
+      if (AppState.session?.pendingTimer) {
+        clearTimeout(AppState.session.pendingTimer);
+      }
+
+      AppState.session = {
+        id,
+        triggered: AppState.triggeredIds.has(id),
+        cancelled: false,
+        autoLikeRequested: false,
+        autoLiked: false,
+        pendingTimer: null,
+        pendingUntil: 0,
+        // 后台冻结的剩余时间；null 表示未冻结，0 是合法冻结值。
+        frozenRemaining: null,
+      };
+
+      AppState.manualAction = null;
+      Records.record(id);
+    },
+
+    fireAutoLike(id) {
+      const session = AppState.session;
+      if (!session || session.id !== id) return;
+
+      session.pendingTimer = null;
+
+      if (!AppState.running || session.cancelled || session.triggered) {
+        return;
+      }
+
+      const ctx = Platform.getCurrentVideo();
+
+      if (!ctx || ctx.id !== id || !Platform.isPlaying(ctx.video)) {
+        return;
+      }
+
+      if (Platform.getLikeState(ctx.likeButton) !== "UNLIKED") {
+        return;
+      }
+
+      session.triggered = true;
+      session.autoLikeRequested = true;
+      AppState.triggeredIds.add(id);
+
+      AutoLike.pressZ();
+
+      UI.setStatus(`视频 ${id}：已发送 Z，监测点赞结果`, "#fe2c55");
+    },
+
+    process() {
+      const s = AppState;
+
+      if (!s.running) {
+        UI.setStatus("自动点赞已停止", "#999");
+        return;
+      }
+
+      if (document.hidden) return;
+
+      const ctx = Platform.getCurrentVideo();
+      if (!ctx) return;
+
+      const { id, video, likeButton } = ctx;
+      UI.setVideoId(id);
+
+      if (!s.session || s.session.id !== id) {
+        AutoLike.createSession(id);
+      }
+
+      AutoLike.attachVideoEvents(video);
+
+      const session = s.session;
+
+      if (session.cancelled) return;
+      if (session.triggered) return;
+
+      // 计时器存活或处于后台冻结态时不重排程。
+      if (session.pendingTimer || session.frozenRemaining !== null) return;
+
+      if (!Platform.isPlaying(video)) return;
+
+      const state = Platform.getLikeState(likeButton);
+      if (state === "UNKNOWN") return;
+
+      if (state === "LIKED") {
+        session.triggered = true;
+        s.triggeredIds.add(id);
+
+        UI.setStatus(`视频 ${id}：已经点赞，跳过`, "#fe2c55");
+        return;
+      }
+
+      const delay =
+        video.duration > 0 && video.duration < CONFIG.timing.likeMs / 1000
+          ? CONFIG.timing.likeShortMs
+          : CONFIG.timing.likeMs;
+
+      session.pendingUntil = Date.now() + delay;
+      session.pendingTimer = setTimeout(() => AutoLike.fireAutoLike(id), delay);
+
+      UI.setStatus(`视频 ${id}：${delay / 1000} 秒后自动点赞`);
+    },
+
+    scheduleProcess() {
+      if (AppState.frame) return;
+
+      AppState.frame = requestAnimationFrame(() => {
+        AppState.frame = 0;
+        AutoLike.process();
+      });
+    },
+
+    markManualAction(event) {
+      const s = AppState;
+
+      if (!s.running || !event.isTrusted || !s.session) return;
+
+      const ctx = Platform.getCurrentVideo();
+      if (!ctx || ctx.id !== s.session.id) return;
+
+      const button = ctx.likeButton;
+      if (!button || Platform.getLikeState(button) !== "LIKED") return;
+
+      if (event.type === "keydown") {
+        const target = event.target;
+
+        if (
+          target instanceof Element &&
+          target.closest('input, textarea, [contenteditable="true"]')
+        ) {
+          return;
+        }
+
+        const key = event.key.toLowerCase();
+
+        const isZ = key === "z";
+        const isButtonKey =
+          (key === "enter" || key === " ") &&
+          (document.activeElement === button ||
+            button.contains(document.activeElement));
+
+        if (!isZ && !isButtonKey) return;
+        if (event.repeat) return;
+      } else {
+        const target = event.target;
+
+        if (!(target instanceof Element)) return;
+        if (target.closest(CONFIG.platform.like) !== button) return;
+      }
+
+      s.manualAction = {
+        id: ctx.id,
+        button,
+        time: performance.now(),
+      };
+    },
+
+    handleLikeMutation(mutation, target) {
+      const s = AppState;
+      if (!s.running || !s.session) return;
+
+      const oldState = mutation.oldValue;
+      const newState = target.getAttribute("data-e2e-state");
+
+      const ctx = Platform.getCurrentVideo();
+      if (!ctx || ctx.id !== s.session.id || ctx.likeButton !== target) return;
+
+      const session = s.session;
+
+      if (
+        oldState === CONFIG.platform.stateUnliked &&
+        newState === CONFIG.platform.stateLiked &&
+        session.autoLikeRequested
+      ) {
+        session.autoLikeRequested = false;
+        session.autoLiked = true;
+
+        UI.setStatus(`视频 ${ctx.id}：已点赞`, "#fe2c55");
+        UI.updateUI();
+        return;
+      }
+
+      if (
+        oldState === CONFIG.platform.stateLiked &&
+        newState === CONFIG.platform.stateUnliked &&
+        session.autoLiked &&
+        s.manualAction &&
+        s.manualAction.id === ctx.id &&
+        s.manualAction.button === target &&
+        performance.now() - s.manualAction.time <
+        CONFIG.timing.manualActionWindowMs
+      ) {
+        session.cancelled = true;
+        session.autoLiked = false;
+
+        // 滑走再滑回视为新观看，取消点赞后可以重新触发自动点赞。
+        s.triggeredIds.delete(ctx.id);
+        s.manualAction = null;
+
+        UI.setStatus(`视频 ${ctx.id}：检测到手动取消点赞`, "#999");
+        UI.updateUI();
+      }
+    },
+
+    onVisibilityChange() {
+      const s = AppState;
+
+      if (document.hidden) {
+        if (s.session?.pendingTimer) {
+          clearTimeout(s.session.pendingTimer);
+          s.session.pendingTimer = null;
+          s.session.frozenRemaining = Math.max(
+            0,
+            s.session.pendingUntil - Date.now(),
+          );
+        }
+        return;
+      }
+
+      // 恢复后台冻结的计时器，继续点赞。
+      if (s.session && s.session.frozenRemaining !== null) {
+        const id = s.session.id;
+        const remaining = s.session.frozenRemaining;
+
+        s.session.pendingUntil = Date.now() + remaining;
+        s.session.pendingTimer = setTimeout(
+          () => AutoLike.fireAutoLike(id),
+          remaining,
+        );
+        s.session.frozenRemaining = null;
+      }
+
+      AutoLike.process();
+    },
+
+    setRunning(value) {
+      AppState.running = value;
+
+      if (!value && AppState.session?.pendingTimer) {
+        clearTimeout(AppState.session.pendingTimer);
+        AppState.session.pendingTimer = null;
+      }
+
+      UI.updateUI();
+      AutoLike.process();
+    },
+  };
+
+  /* ================================================================
+   * §5 SLEEP TIMER — 睡眠定时器，播放一段时间后暂停视频
+   * ================================================================ */
+
+  const SleepTimer = {
+    remainingMs() {
+      const { endAt } = AppState.timer;
+      return endAt === 0 ? 0 : Math.max(0, endAt - Date.now());
+    },
+
+    stop() {
+      const t = AppState.timer;
+
+      clearTimeout(t.timeoutId);
+      clearInterval(t.tickId);
+
+      t.timeoutId = null;
+      t.tickId = null;
+      t.endAt = 0;
+    },
+
+    start(minutes) {
+      SleepTimer.stop();
+
+      const t = AppState.timer;
+      t.endAt = Date.now() + minutes * 60_000;
+      t.timeoutId = setTimeout(
+        () => SleepTimer.finish(),
+        SleepTimer.remainingMs(),
+      );
+      t.tickId = setInterval(
+        () => SleepTimer.onTick(),
+        CONFIG.timing.playbackTickMs,
       );
 
-    a.download = `douyin_video_ids_${today}.json`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-  });
-  GM_addStyle(`
+      UI.updateTimerUI();
+      SleepTimer.onTick();
+    },
+
+    onTick() {
+      if (AppState.timer.endAt === 0) return;
+
+      const ms = SleepTimer.remainingMs();
+      UI.setTimerStatus(
+        ms === 0 ? "正在暂停…" : `剩余 ${formatRemaining(ms)}`,
+      );
+    },
+
+    finish() {
+      if (AppState.timer.endAt === 0) return;
+
+      SleepTimer.stop();
+      UI.updateTimerUI();
+
+      const ctx = Platform.getCurrentVideo();
+
+      if (!ctx) {
+        UI.setTimerStatus("未能定位当前视频");
+        return;
+      }
+
+      ctx.video.pause();
+      UI.setTimerStatus("定时结束");
+    },
+
+    onVisibilityChange() {
+      if (document.hidden || AppState.timer.endAt === 0) return;
+
+      if (SleepTimer.remainingMs() === 0) {
+        SleepTimer.finish();
+      } else {
+        SleepTimer.onTick();
+      }
+    },
+  };
+
+  /* ================================================================
+   * §6 UI & PANEL — 面板 DOM、样式与全部指针/点击事件
+   * 事件一律经 on() 注册，保证 abort 时可回收。
+   * ================================================================ */
+
+  const UI = {
+    el: {},
+
+    css: `
     #dy-panel {
       position: fixed;
       right: 20px;
@@ -246,13 +784,9 @@
       cursor: pointer;
       opacity: .7;
     }
+  `,
 
-    /* 睡眠定时器控件外观由使用者补充，此处不预置取值 */
-  `);
-
-  const panel = document.createElement("div");
-  panel.id = "dy-panel";
-  panel.innerHTML = `
+    html: `
     <div id="dy-header">
       <span id="dy-dot"></span>
       <span id="dy-title">抖音自动点赞</span>
@@ -307,555 +841,191 @@
         <button id="dy-timer-toggle" type="button" hidden>取消</button>
       </div>
     </div>
-  `;
+  `,
 
-  document.body.appendChild(panel);
+    mount() {
+      GM_addStyle(UI.css);
 
-  // 默认折叠
-  panel.classList.add("collapsed");
+      const panel = document.createElement("div");
+      panel.id = "dy-panel";
+      panel.innerHTML = UI.html;
 
-  const $ = (selector) => panel.querySelector(selector);
-  const statusEl = $("#dy-status");
-  const videoIdEl = $("#dy-video");
-  const countEl = $("#dy-count");
-  const titleEl = $("#dy-title");
-  const dotEl = $("#dy-dot");
-  const toggleEl = $("#dy-toggle");
-  const timerControlsEl = $("#dy-timer-controls");
-  const timerHoursEl = $("#dy-timer-hours");
-  const timerMinutesEl = $("#dy-timer-minutes");
-  const timerCustomEl = $("#dy-timer-custom");
-  const timerCancelEl = $("#dy-timer-toggle");
-  const timerStatusEl = $("#dy-timer-status");
+      document.body.appendChild(panel);
+      panel.classList.add("collapsed");
+      Runtime.panel = panel;
 
-  let lastStatus = "";
-  let lastColor = "";
+      const $ = (selector) => panel.querySelector(selector);
+      UI.el = {
+        panel,
+        status: $("#dy-status"),
+        video: $("#dy-video"),
+        count: $("#dy-count"),
+        title: $("#dy-title"),
+        dot: $("#dy-dot"),
+        toggle: $("#dy-toggle"),
+        timerControls: $("#dy-timer-controls"),
+        timerHours: $("#dy-timer-hours"),
+        timerMinutes: $("#dy-timer-minutes"),
+        timerCustom: $("#dy-timer-custom"),
+        timerCancel: $("#dy-timer-toggle"),
+        timerStatus: $("#dy-timer-status"),
+        close: $("#dy-close"),
+        header: $("#dy-header"),
+      };
+    },
 
-  function setStatus(message, color = "#f5a623") {
-    if (message === lastStatus && color === lastColor) {
-      return;
-    }
+    contains(node) {
+      const panel = Runtime.panel;
+      return Boolean(node && (node === panel || panel.contains(node)));
+    },
 
-    lastStatus = message;
-    lastColor = color;
-
-    statusEl.textContent = message;
-    statusEl.style.color = color;
-  }
-
-  function updateUI() {
-    dotEl.style.background = running ? "#2ecc71" : "#ff4d4f";
-
-    toggleEl.checked = running;
-
-    titleEl.textContent = collapsed
-      ? running
-        ? "运行中"
-        : "暂停中"
-      : "自动点赞脚本";
-
-    countEl.textContent = `今日累计刷视频${getCount()}`;
-  }
-
-  /* ==================== 视频状态监测 ==================== */
-
-  function isPlaying(video) {
-    return (
-      !video.paused &&
-      !video.ended &&
-      video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
-    );
-  }
-
-  function isVisibleVideo(video) {
-    const rect = video.getBoundingClientRect();
-    const style = getComputedStyle(video);
-
-    return (
-      rect.width >= MIN_VISIBLE_SIZE &&
-      rect.height >= MIN_VISIBLE_SIZE &&
-      rect.bottom > 0 &&
-      rect.right > 0 &&
-      rect.top < window.innerHeight &&
-      rect.left < window.innerWidth &&
-      style.display !== "none" &&
-      style.visibility !== "hidden" &&
-      style.opacity !== "0"
-    );
-  }
-
-  function getVideoIdFromAncestors(video) {
-    let node = video;
-
-    while (node && node !== document.body) {
-      const id = node.getAttribute("data-e2e-vid")?.trim();
-
-      if (id && VID_PATTERN.test(id)) {
-        return id;
+    setStatus(message, color = "#f5a623") {
+      if (message === AppState.lastStatus && color === AppState.lastColor) {
+        return;
       }
-      node = node.parentElement;
-    }
 
-    return null;
-  }
+      AppState.lastStatus = message;
+      AppState.lastColor = color;
 
-  function findLikeButton(box) {
-    if (!box) return null;
-    return (
-      box.querySelector(PLAYER_DIGG_SELECTOR) ||
-      box.querySelector(FEED_DIGG_SELECTOR)
-    );
-  }
+      UI.el.status.textContent = message;
+      UI.el.status.style.color = color;
+    },
 
-  function getLikeState(button) {
-    if (!button) return "UNKNOWN";
-    const state = button.getAttribute("data-e2e-state");
-    if (state === STATE_LIKED) {
-      return "LIKED";
-    }
-    if (state === STATE_UNLIKED) {
-      return "UNLIKED";
-    }
+    setVideoId(id) {
+      UI.el.video.textContent = `当前视频ID：${id}`;
+    },
 
-    return "UNKNOWN";
-  }
+    setTimerStatus(message) {
+      UI.el.timerStatus.textContent = message;
+    },
 
-  // 识别视频上下文
-  function getVideoContext(video, requireControls = false) {
-    let container = video.closest(ACTIVE_SELECTOR);
-    let likeButton = findLikeButton(container);
+    updateTimerUI() {
+      const active = AppState.timer.endAt !== 0;
 
-    if (!likeButton) {
-      let node = video.parentElement;
+      UI.el.timerControls.disabled = active;
+      UI.el.timerCancel.hidden = !active;
+    },
 
-      while (node && node !== document.body) {
-        if (node.querySelectorAll("video").length === 1) {
-          const button = findLikeButton(node);
+    updateUI() {
+      const s = AppState;
+      const el = UI.el;
 
-          if (button) {
-            container = node;
-            likeButton = button;
-            break;
+      el.dot.style.background = s.running ? "#2ecc71" : "#ff4d4f";
+      el.toggle.checked = s.running;
+      el.title.textContent = s.collapsed
+        ? s.running
+          ? "运行中"
+          : "暂停中"
+        : "自动点赞脚本";
+      el.count.textContent = `今日累计刷视频${Records.getCount()}`;
+    },
+
+    setCollapsed(value) {
+      AppState.collapsed = value;
+      Runtime.panel.classList.toggle("collapsed", value);
+      UI.updateUI();
+    },
+
+    resetPress() {
+      if (!AppState.press) return;
+
+      clearTimeout(AppState.press.timer);
+      AppState.press = null;
+    },
+
+    onHeaderDown(event) {
+      if (event.target.closest("#dy-close")) return;
+
+      const rect = Runtime.panel.getBoundingClientRect();
+
+      AppState.press = {
+        pointerId: event.pointerId,
+        x: event.clientX,
+        y: event.clientY,
+        left: rect.left,
+        top: rect.top,
+        moved: false,
+        timer: setTimeout(() => {
+          AppState.press = null;
+
+          if (AppState.collapsed) {
+            UI.setCollapsed(false);
           }
+        }, CONFIG.timing.longPressMs),
+      };
+
+      event.preventDefault();
+    },
+
+    onPointerMove(event) {
+      const press = AppState.press;
+      if (!press || event.pointerId !== press.pointerId) return;
+
+      if (!press.moved) {
+        const dx = event.clientX - press.x;
+        const dy = event.clientY - press.y;
+
+        if (Math.hypot(dx, dy) < CONFIG.timing.dragThresholdPx) return;
+
+        press.moved = true;
+        clearTimeout(press.timer);
+      }
+
+      Runtime.panel.style.left = `${press.left + event.clientX - press.x}px`;
+      Runtime.panel.style.top = `${press.top + event.clientY - press.y}px`;
+      Runtime.panel.style.right = "auto";
+      Runtime.panel.style.bottom = "auto";
+    },
+
+    onPointerEnd(event) {
+      if (!AppState.press || event.pointerId !== AppState.press.pointerId) {
+        return;
+      }
+      UI.resetPress();
+    },
+
+    bindEvents() {
+      const el = UI.el;
+
+      on(el.toggle, "change", () => AutoLike.setRunning(el.toggle.checked));
+
+      on(el.timerControls, "click", (event) => {
+        const button = event.target.closest("[data-minutes]");
+        if (button) SleepTimer.start(Number(button.dataset.minutes));
+      });
+
+      on(el.timerCustom, "click", () => {
+        const minutes = parseDuration(
+          el.timerHours.valueAsNumber,
+          el.timerMinutes.valueAsNumber,
+        );
+
+        if (minutes === null) {
+          UI.setTimerStatus("请设置大于 0 的时长");
+          return;
         }
 
-        node = node.parentElement;
-      }
-    }
-
-    const id = getVideoIdFromAncestors(video);
-
-    if (!id || !VID_PATTERN.test(id)) {
-      return null;
-    }
-
-    if (requireControls && !container?.querySelector(CONTROL_SELECTOR)) {
-      return null;
-    }
-
-    return {
-      id,
-      video,
-      likeButton,
-    };
-  }
-
-  function getVisibleVideoCandidates(root = document) {
-    return Array.from(root.querySelectorAll("video")).filter(isVisibleVideo);
-  }
-
-  function rankVideos(videos) {
-    return videos
-      .map((video) => {
-        const rect = video.getBoundingClientRect();
-
-        return {
-          video,
-          area: rect.width * rect.height,
-          playing: isPlaying(video),
-        };
-      })
-      .sort((a, b) => b.playing - a.playing || b.area - a.area)
-      .map((item) => item.video);
-  }
-
-  function chooseMainVideo(videos) {
-    return rankVideos(videos)[0] || null;
-  }
-
-  function resolvePlatformMarkedVideo() {
-    const videos = Array.from(document.querySelectorAll(ACTIVE_SELECTOR))
-      .map((box) => box.querySelector("video"))
-      .filter(Boolean);
-
-    const selected = chooseMainVideo(videos);
-
-    return selected ? getVideoContext(selected) : null;
-  }
-
-  function resolveUrlMatchedVideo() {
-    const modalId = getModalId();
-
-    if (!modalId) return null;
-    const exactNode = Array.from(
-      document.querySelectorAll("[data-e2e-vid]"),
-    ).find((node) => node.getAttribute("data-e2e-vid") === modalId);
-
-    if (exactNode) {
-      const video = exactNode.matches("video")
-        ? exactNode
-        : exactNode.querySelector("video");
-
-      const ctx = video ? getVideoContext(video) : null;
-
-      if (ctx) return ctx;
-    }
-
-    for (const dialog of getVisibleDialogs()) {
-      const video = chooseMainVideo(getVisibleVideoCandidates(dialog));
-      const ctx = video ? getVideoContext(video) : null;
-      if (ctx && ctx.id === modalId) return ctx;
-    }
-
-    return null;
-  }
-
-  function getModalId() {
-    const id = new URL(location.href).searchParams.get("modal_id");
-
-    return id && VID_PATTERN.test(id) ? id : null;
-  }
-
-  function getVisibleDialogs() {
-    return Array.from(document.querySelectorAll('[role="dialog"]')).filter(
-      (dialog) => {
-        const rect = dialog.getBoundingClientRect();
-
-        return (
-          rect.width >= MIN_VISIBLE_SIZE && rect.height >= MIN_VISIBLE_SIZE
-        );
-      },
-    );
-  }
-
-  // 通过启发式选择当前视频：按播放状态和可见区域面积排序，优先正在播放的视频。
-  function resolveHeuristicVideo() {
-    for (const video of rankVideos(getVisibleVideoCandidates())) {
-      const ctx = getVideoContext(video, true);
-
-      if (ctx) return ctx;
-    }
-
-    return null;
-  }
-
-  const VIDEO_RESOLVERS = [
-    resolvePlatformMarkedVideo,
-    resolveUrlMatchedVideo,
-    resolveHeuristicVideo,
-  ];
-
-  function getCurrentVideo() {
-    for (const resolve of VIDEO_RESOLVERS) {
-      const ctx = resolve();
-
-      if (ctx) return ctx;
-    }
-
-    return null;
-  }
-
-  /* ==================== Z 键通道与播放事件 ==================== */
-
-  function pressZ() {
-    const options = {
-      key: "z",
-      code: "KeyZ",
-      keyCode: 90,
-      which: 90,
-      bubbles: true,
-      cancelable: true,
-    };
-
-    document.dispatchEvent(new KeyboardEvent("keydown", options));
-
-    document.dispatchEvent(new KeyboardEvent("keyup", options));
-  }
-
-  // 需要触发重新处理的播放相关事件。
-  const VIDEO_EVENTS = [
-    "playing",
-    "play",
-    "pause",
-    "waiting",
-    "stalled",
-    "ended",
-    "canplay",
-    "loadeddata",
-  ];
-
-  function attachVideoEvents(video) {
-    if (videoListeners.has(video)) return;
-    const handler = () => process();
-    for (const name of VIDEO_EVENTS) {
-      video.addEventListener(name, handler);
-    }
-    videoListeners.set(video, handler);
-  }
-
-  /* ==================== 视频会话 ==================== */
-
-  function createSession(id) {
-    if (session?.pendingTimer) {
-      clearTimeout(session.pendingTimer);
-    }
-
-    session = {
-      id,
-      triggered: triggeredIds.has(id),
-      cancelled: false,
-      autoLikeRequested: false,
-      autoLiked: false,
-      pendingTimer: null,
-      // 冻结剩余时间
-      frozenRemaining: null,
-    };
-
-    manualAction = null;
-
-    recordVideo(id);
-  }
-
-  function fireAutoLike(id) {
-    if (!session || session.id !== id) return;
-
-    session.pendingTimer = null;
-
-    if (!running || session.cancelled || session.triggered) {
-      return;
-    }
-
-    const ctx = getCurrentVideo();
-
-    if (!ctx || ctx.id !== id || !isPlaying(ctx.video)) {
-      return;
-    }
-
-    if (getLikeState(ctx.likeButton) !== "UNLIKED") {
-      return;
-    }
-
-    session.triggered = true;
-    session.autoLikeRequested = true;
-
-    triggeredIds.add(id);
-
-    pressZ();
-
-    setStatus(`视频 ${id}：已发送 Z，监测点赞结果`, "#fe2c55");
-  }
-
-  /* ==================== 核心处理 ==================== */
-
-  function process() {
-    if (!running) {
-      setStatus("自动点赞已停止", "#999");
-      return;
-    }
-
-    if (document.hidden) return;
-
-    const ctx = getCurrentVideo();
-
-    if (!ctx) return;
-
-    const { id, video, likeButton } = ctx;
-
-    videoIdEl.textContent = `当前官方视频 ID：${id}`;
-
-    // ID 变化才创建新任务。
-    if (!session || session.id !== id) {
-      createSession(id);
-    }
-
-    attachVideoEvents(video);
-
-    // 人工取消后不再自动点赞。
-    if (session.cancelled) {
-      return;
-    }
-
-    // 已触发过，不再重复触发。
-    if (session.triggered) {
-      return;
-    }
-
-    // 延迟点赞，给用户留出判断时间。
-    // 计时器存活或处于后台冻结态时不重排程。
-    if (session.pendingTimer || session.frozenRemaining) {
-      return;
-    }
-
-    // 暂停、缓冲、未开始播放时不执行。
-    if (!isPlaying(video)) return;
-
-    // 等待当前视频的点赞按钮及状态加载。
-    const state = getLikeState(likeButton);
-
-    if (state === "UNKNOWN") return;
-
-    // 已点赞，跳过。
-    if (state === "LIKED") {
-      session.triggered = true;
-      triggeredIds.add(id);
-
-      setStatus(`视频 ${id}：已经点赞，跳过`, "#fe2c55");
-      return;
-    }
-    const delay =
-      video.duration > 0 && video.duration < LIKE_DELAY / 1000
-        ? LIKE_DELAY_SHORT
-        : LIKE_DELAY;
-
-    session.pendingUntil = Date.now() + delay;
-    session.pendingTimer = setTimeout(() => fireAutoLike(id), delay);
-
-    setStatus(`视频 ${id}：${delay / 1000} 秒后自动点赞`);
-  }
-
-  // 调度处理。
-  function scheduleProcess() {
-    if (frame) return;
-
-    frame = requestAnimationFrame(() => {
-      frame = 0;
-      process();
-    });
-  }
-
-  // 判断是否是面板节点
-  function isPanelNode(node) {
-    return Boolean(node && (node === panel || panel.contains(node)));
-  }
-
-  /* ==================== 人工操作的处理 ==================== */
-
-  function markManualAction(event) {
-    if (!running || !event.isTrusted || !session) {
-      return;
-    }
-
-    const ctx = getCurrentVideo();
-
-    if (!ctx || ctx.id !== session.id) {
-      return;
-    }
-
-    const button = ctx.likeButton;
-
-    if (!button || getLikeState(button) !== "LIKED") {
-      return;
-    }
-
-    if (event.type === "keydown") {
-      const target = event.target;
-
-      if (
-        target instanceof Element &&
-        target.closest('input, textarea, [contenteditable="true"]')
-      ) {
-        return;
-      }
-
-      const key = event.key.toLowerCase();
-
-      const isZ = key === "z";
-      const isButtonKey =
-        (key === "enter" || key === " ") &&
-        (document.activeElement === button ||
-          button.contains(document.activeElement));
-
-      if (!isZ && !isButtonKey) {
-        return;
-      }
-
-      if (event.repeat) return;
-    } else {
-      const target = event.target;
-
-      if (!(target instanceof Element)) return;
-
-      if (target.closest(LIKE_SELECTOR) !== button) {
-        return;
-      }
-    }
-
-    manualAction = {
-      id: ctx.id,
-      button,
-      time: performance.now(),
-    };
-  }
-
-  document.addEventListener("pointerdown", markManualAction, true);
-
-  document.addEventListener("keydown", markManualAction, true);
-
-  function handleLikeMutation(mutation, target) {
-    if (!running || !session) return;
-
-    const oldState = mutation.oldValue;
-    const newState = target.getAttribute("data-e2e-state");
-
-    const ctx = getCurrentVideo();
-
-    if (!ctx || ctx.id !== session.id || ctx.likeButton !== target) {
-      return;
-    }
-
-    // 自动点赞请求成功。
-    if (
-      oldState === STATE_UNLIKED &&
-      newState === STATE_LIKED &&
-      session.autoLikeRequested
-    ) {
-      session.autoLikeRequested = false;
-      session.autoLiked = true;
-
-      likedIds.add(ctx.id);
-
-      setStatus(`视频 ${ctx.id}：已点赞`, "#fe2c55");
-      updateUI();
-
-      return;
-    }
-
-    // 手动取消点赞处理
-    if (
-      oldState === STATE_LIKED &&
-      newState === STATE_UNLIKED &&
-      session.autoLiked &&
-      manualAction &&
-      manualAction.id === ctx.id &&
-      manualAction.button === target &&
-      performance.now() - manualAction.time < 2000
-    ) {
-      session.cancelled = true;
-      session.autoLiked = false;
-
-      likedIds.delete(ctx.id);
-      // 滑走再滑回视为新观看，取消点赞后仍然可以重新触发自动点赞。
-      triggeredIds.delete(ctx.id);
-
-      manualAction = null;
-
-      setStatus(`视频 ${ctx.id}：检测到手动取消点赞`, "#999");
-
-      updateUI();
-    }
-  }
-
-  /* ==================== DOM 结构变化的处理 ==================== */
+        SleepTimer.start(minutes);
+      });
+
+      on(el.timerCancel, "click", () => {
+        SleepTimer.stop();
+        UI.updateTimerUI();
+        UI.setTimerStatus("已取消");
+      });
+
+      on(el.close, "click", () => UI.setCollapsed(true));
+      on(el.header, "pointerdown", UI.onHeaderDown);
+
+      on(document, "pointermove", UI.onPointerMove);
+      on(document, "pointerup", UI.onPointerEnd);
+      on(document, "pointercancel", UI.onPointerEnd);
+    },
+  };
+
+  /* ================================================================
+   * 唯一的组装点：观察者、路由钩子、全局监听、启动
+   * ================================================================ */
 
   function getMutationTarget(mutation) {
     return mutation.target.nodeType === 1
@@ -863,348 +1033,100 @@
       : mutation.target.parentElement;
   }
 
-  // 结构变化：视频切换、弹层打开关闭、DOM 节点增删等。
-  structureObserver = new MutationObserver((mutations) => {
-    if (
-      mutations.some((mutation) => !isPanelNode(getMutationTarget(mutation)))
-    ) {
-      scheduleProcess();
-    }
-  });
-
-  structureObserver.observe(document.body, {
-    childList: true,
-    subtree: true,
-  });
-
-
-  stateObserver = new MutationObserver((mutations) => {
-    let shouldProcess = false;
-
-    for (const mutation of mutations) {
-      const target = getMutationTarget(mutation);
-
-      if (!target || isPanelNode(target)) {
-        continue;
-      }
-
-      if (
-        mutation.attributeName === "data-e2e-state" &&
-        target.matches(LIKE_SELECTOR)
-      ) {
-        handleLikeMutation(mutation, target);
-      }
-
-      shouldProcess = true;
-    }
-
-    if (shouldProcess) {
-      scheduleProcess();
-    }
-  });
-
-  stateObserver.observe(document.body, {
-    attributes: true,
-    subtree: true,
-    attributeOldValue: true,
-    attributeFilter: ["data-e2e", "data-e2e-state", "data-e2e-vid"],
-  });
-
-  /* ==================== 路由变化的处理 ==================== */
-
-  const originalPushState = history.pushState;
-  const originalReplaceState = history.replaceState;
-
   function onRouteChange() {
-    manualAction = null;
-    scheduleProcess();
+    AppState.manualAction = null;
+    AutoLike.scheduleProcess();
   }
 
-  function wrappedPushState(...args) {
-    const result = originalPushState.apply(this, args);
-
-    onRouteChange();
-
-    return result;
-  }
-
-  function wrappedReplaceState(...args) {
-    const result = originalReplaceState.apply(this, args);
-
-    onRouteChange();
-
-    return result;
-  }
-
-  history.pushState = wrappedPushState;
-  history.replaceState = wrappedReplaceState;
-
-  window.addEventListener("popstate", onRouteChange);
-
-  /*
-   * 页面切换时冻结自动点赞，避免功能在后台被节流后消耗资源。
-   */
+  // 页面可见性变化时，处理自动点赞和休眠计时器
   function onVisibilityChange() {
-    if (document.hidden) {
-      if (session?.pendingTimer) {
-        clearTimeout(session.pendingTimer);
+    AutoLike.onVisibilityChange();
+    SleepTimer.onVisibilityChange();
+  }
 
-        session.pendingTimer = null;
-        session.frozenRemaining = Math.max(
-          0,
-          session.pendingUntil - Date.now()
-        );
+  function installObservers() {
+    // 结构变化：视频切换、弹层打开关闭、DOM 节点增删等。
+    observe(document.body, { childList: true, subtree: true }, (mutations) => {
+      if (
+        mutations.some((mutation) => !UI.contains(getMutationTarget(mutation)))
+      ) {
+        AutoLike.scheduleProcess();
       }
+    });
 
-      return;
-    }
+    observe(
+      document.body,
+      {
+        attributes: true,
+        subtree: true,
+        attributeOldValue: true,
+        attributeFilter: ["data-e2e", "data-e2e-state", "data-e2e-vid"],
+      },
+      (mutations) => {
+        let shouldProcess = false;
 
-    if (session?.frozenRemaining) {
-      session.pendingUntil = Date.now() + session.frozenRemaining;
-      session.pendingTimer = setTimeout(
-        () => fireAutoLike(session.id),
-        session.frozenRemaining
-      );
+        for (const mutation of mutations) {
+          const target = getMutationTarget(mutation);
 
-      session.frozenRemaining = null;
-    }
+          if (!target || UI.contains(target)) continue;
 
-    process();
-  }
+          if (
+            mutation.attributeName === "data-e2e-state" &&
+            target.matches(CONFIG.platform.like)
+          ) {
+            AutoLike.handleLikeMutation(mutation, target);
+          }
 
-  document.addEventListener("visibilitychange", onVisibilityChange);
-
-  /*
-   * 睡眠定时功能：设定时间自动暂停当前视频，避免刷视频过久。
-   */
-  let playbackEndAt = 0;
-  let playbackTimeoutId = null;
-  let playbackTickId = null;
-
-  const PLAYBACK_TICK_MS = 1000;
-
-  function playbackRemainingMs() {
-    return playbackEndAt === 0 ? 0 : Math.max(0, playbackEndAt - Date.now());
-  }
-
-  function formatRemaining(ms) {
-    const total = Math.ceil(ms / 1000);
-    const minutes = Math.floor(total / 60);
-    const seconds = total % 60;
-
-    return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-  }
-
-  function setTimerStatus(message) {
-    timerStatusEl.textContent = message;
-  }
-
-  function updateTimerUI() {
-    const active = playbackEndAt !== 0;
-
-    timerControlsEl.disabled = active;
-    timerCancelEl.hidden = !active;
-  }
-
-  // 解析时长输入
-  function parseDuration(hours, minutes) {
-    if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null;
-    if (!Number.isInteger(hours) || !Number.isInteger(minutes)) return null;
-    if (hours < 0 || minutes < 0) return null;
-
-    const total = hours * 60 + minutes;
-
-    return total > 0 ? total : null;
-  }
-
-  function stopPlaybackTimer() {
-    clearTimeout(playbackTimeoutId);
-    clearInterval(playbackTickId);
-
-    playbackTimeoutId = null;
-    playbackTickId = null;
-    playbackEndAt = 0;
-  }
-
-  function startPlaybackTimer(minutes) {
-    stopPlaybackTimer();
-
-    playbackEndAt = Date.now() + minutes * 60_000;
-    playbackTimeoutId = setTimeout(finishPlaybackTimer, playbackRemainingMs());
-    playbackTickId = setInterval(onPlaybackTick, PLAYBACK_TICK_MS);
-
-    updateTimerUI();
-    onPlaybackTick();
-  }
-
-  function onPlaybackTick() {
-    if (playbackEndAt === 0) return;
-
-    const ms = playbackRemainingMs();
-
-    setTimerStatus(ms === 0 ? "正在暂停…" : `剩余 ${formatRemaining(ms)}`);
-  }
-
-  function finishPlaybackTimer() {
-    if (playbackEndAt === 0) return;
-
-    stopPlaybackTimer();
-    updateTimerUI();
-
-    const ctx = getCurrentVideo();
-
-    if (!ctx) {
-      setTimerStatus("未能定位当前视频");
-      return;
-    }
-
-    ctx.video.pause();
-    setTimerStatus("定时结束");
-  }
-
-  function onPlaybackVisible() {
-    if (document.hidden || playbackEndAt === 0) return;
-
-    if (playbackRemainingMs() === 0) {
-      finishPlaybackTimer();
-    } else {
-      onPlaybackTick();
-    }
-  }
-
-  document.addEventListener("visibilitychange", onPlaybackVisible);
-
-  /* ==================== 面板交互 ==================== */
-
-  function onToggle() {
-    running = toggleEl.checked;
-
-    if (!running && session?.pendingTimer) {
-      clearTimeout(session.pendingTimer);
-      session.pendingTimer = null;
-    }
-
-    updateUI();
-    process();
-  }
-
-  const LONG_PRESS_MS = 500;
-  const DRAG_THRESHOLD = 5;
-
-  let press = null;
-
-  function resetPress() {
-    if (!press) return;
-
-    clearTimeout(press.timer);
-
-    press = null;
-  }
-
-  function setCollapsed(value) {
-    collapsed = value;
-
-    panel.classList.toggle("collapsed", collapsed);
-
-    updateUI();
-  }
-
-  function onHeaderDown(event) {
-    if (event.target.closest("#dy-close")) {
-      return;
-    }
-
-    const rect = panel.getBoundingClientRect();
-
-    press = {
-      pointerId: event.pointerId,
-      x: event.clientX,
-      y: event.clientY,
-      left: rect.left,
-      top: rect.top,
-      moved: false,
-      timer: setTimeout(() => {
-        press = null;
-
-        if (collapsed) {
-          setCollapsed(false);
+          shouldProcess = true;
         }
-      }, LONG_PRESS_MS),
-    };
 
-    event.preventDefault();
-  }
-
-  function onPointerMove(event) {
-    if (!press || event.pointerId !== press.pointerId) return;
-
-    if (!press.moved) {
-      const dx = event.clientX - press.x;
-      const dy = event.clientY - press.y;
-
-      if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
-
-      press.moved = true;
-
-      clearTimeout(press.timer);
-    }
-
-    panel.style.left = `${press.left + event.clientX - press.x}px`;
-
-    panel.style.top = `${press.top + event.clientY - press.y}px`;
-
-    panel.style.right = "auto";
-    panel.style.bottom = "auto";
-  }
-
-  function onPointerUp(event) {
-    if (!press || event.pointerId !== press.pointerId) return;
-    resetPress();
-  }
-
-  function onPointerCancel(event) {
-    if (!press || event.pointerId !== press.pointerId) return;
-    resetPress();
-  }
-
-  toggleEl.addEventListener("change", onToggle);
-
-  timerControlsEl.addEventListener("click", (event) => {
-    const button = event.target.closest("[data-minutes]");
-
-    if (button) startPlaybackTimer(Number(button.dataset.minutes));
-  });
-
-  timerCustomEl.addEventListener("click", () => {
-    const minutes = parseDuration(
-      timerHoursEl.valueAsNumber,
-      timerMinutesEl.valueAsNumber
+        if (shouldProcess) AutoLike.scheduleProcess();
+      },
     );
+  }
 
-    if (minutes === null) {
-      setTimerStatus("请设置大于 0 的时长");
-      return;
-    }
+  function installRouteHooks() {
+    const originalPushState = history.pushState;
+    const originalReplaceState = history.replaceState;
 
-    startPlaybackTimer(minutes);
-  });
+    const wrap = (original) =>
+      function (...args) {
+        const result = original.apply(this, args);
+        onRouteChange();
+        return result;
+      };
 
-  timerCancelEl.addEventListener("click", () => {
-    stopPlaybackTimer();
-    updateTimerUI();
-    setTimerStatus("已取消");
-  });
+    history.pushState = wrap(originalPushState);
+    history.replaceState = wrap(originalReplaceState);
+    on(window, "popstate", onRouteChange);
 
-  $("#dy-close").addEventListener("click", () => setCollapsed(true));
-  $("#dy-header").addEventListener("pointerdown", onHeaderDown);
+    // 卸载时恢复原始方法，避免污染全局 history 对象
+    onDispose(() => {
+      history.pushState = originalPushState;
+      history.replaceState = originalReplaceState;
+    });
+  }
 
-  document.addEventListener("pointermove", onPointerMove);
-  document.addEventListener("pointerup", onPointerUp);
-  document.addEventListener("pointercancel", onPointerCancel);
+  function installGlobalListeners() {
+    on(document, "pointerdown", AutoLike.markManualAction, { capture: true });
+    on(document, "keydown", AutoLike.markManualAction, { capture: true });
+    on(document, "visibilitychange", onVisibilityChange);
+  }
 
-  /* ==================== 启动 ==================== */
+  function registerCleanup() {
+    onDispose(() => clearTimeout(AppState.session?.pendingTimer));
+    onDispose(() => SleepTimer.stop());
+  }
 
-  saveRecords();
-  updateUI();
-  process();
+  UI.mount();
+  UI.bindEvents();
+  installObservers();
+  installRouteHooks();
+  installGlobalListeners();
+  registerCleanup();
+  Records.registerMenu();
+
+  Records.save();
+  UI.updateUI();
+  AutoLike.process();
 })();
