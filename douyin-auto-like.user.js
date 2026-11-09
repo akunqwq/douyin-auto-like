@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         抖音自动点赞
-// @version      2.6.7
-// @description  按实际播放进度累计后点赞（默认 10 秒，短视频 3 秒），通过快捷键通道实现自动点赞，并跟踪点赞状态与手动操作；附带睡眠定时功能。
+// @version      2.8.8
+// @description  按实际播放进度累计后点赞，通过 Z 键通道自动点赞，推荐流、首页精选、以及弹窗搜索视频中都能无缝通用、稳定触发。
 // @author       阿鲲
 // @match        https://www.douyin.com/*
 // @grant        GM_registerMenuCommand
@@ -10,6 +10,7 @@
 // @grant        GM_addStyle
 // @run-at       document-idle
 // ==/UserScript==
+
 (function () {
   "use strict";
 
@@ -59,7 +60,6 @@
     lastStatus: "",
     lastColor: "",
     press: null,
-    // 睡眠定时器状态：增加 remainingMs 动态记录剩余毫秒，支持暂停挂起
     timer: {
       active: false,
       remainingMs: 0,
@@ -108,6 +108,11 @@
       return "UNKNOWN";
     },
 
+    getModalId() {
+      const id = new URL(location.href).searchParams.get("modal_id");
+      return id && CONFIG.platform.vidPattern.test(id) ? id : null;
+    },
+
     getVideoContext(player) {
       const id = player.getAttribute("data-e2e-vid")?.trim();
       const video = player.querySelector("video");
@@ -116,14 +121,27 @@
     },
 
     getCurrentVideo() {
+      const modalId = Platform.getModalId();
+      
+      // 如果处于 modal_id 弹窗状态，优先尝试通过 modal_id 匹配对应的视频播放器
+      if (modalId) {
+        const modalPlayer = document.querySelector(`[data-e2e-vid="${modalId}"]`) || document.querySelector(CONFIG.platform.activePlayer);
+        if (modalPlayer) {
+          const video = modalPlayer.querySelector("video");
+          if (video) {
+            return {
+              id: modalId,
+              video,
+              likeButton: Platform.findLikeButton(modalPlayer),
+            };
+          }
+        }
+      }
+
+      // 常规推荐流逻辑
       const player = document.querySelector(CONFIG.platform.activePlayer);
       if (!player) return null;
-      const ctx = Platform.getVideoContext(player);
-      if (!ctx) return null;
-
-      const modalId = new URL(location.href).searchParams.get("modal_id");
-      if (modalId && CONFIG.platform.vidPattern.test(modalId) && modalId !== ctx.id) return null;
-      return ctx;
+      return Platform.getVideoContext(player);
     },
   };
 
@@ -224,7 +242,11 @@
       if (!session || session.id !== id || !AppState.running || session.cancelled || session.triggered) return;
 
       const ctx = Platform.getCurrentVideo();
-      if (!ctx || ctx.id !== id || !Platform.isPlaying(ctx.video) || Platform.getLikeState(ctx.likeButton) !== "UNLIKED") return;
+      if (!ctx || ctx.id !== id || !Platform.isPlaying(ctx.video)) return;
+
+      // 在搜索弹窗视频状态中，找不到直接挂载当前弹窗内点赞按钮，允许查询全局可见的点赞按钮
+      const likeBtn = ctx.likeButton || document.querySelector(CONFIG.platform.playerDigg);
+      if (Platform.getLikeState(likeBtn) !== "UNLIKED") return;
 
       session.triggered = true;
       session.autoLikeRequested = true;
@@ -253,14 +275,16 @@
       const session = s.session;
       if (session.cancelled || session.triggered) return;
 
-      const state = Platform.getLikeState(likeButton);
+      const activeLikeBtn = likeButton || document.querySelector(CONFIG.platform.playerDigg);
+      const state = Platform.getLikeState(activeLikeBtn);
+      
       if (state === "LIKED") {
         session.triggered = true;
         s.triggeredIds.add(id);
         UI.setStatus(`视频 ${id}：已点赞，跳过`, "#fe2c55");
         return;
       }
-      if (state === "UNLIKED") {
+      if (state === "UNLIKED" || state === "UNKNOWN") {
         UI.setStatus(`视频 ${id}：累计播放 ${AutoLike.getTargetSec(video)} 秒后点赞`);
       }
     },
@@ -278,7 +302,9 @@
       if (!s.running || !event.isTrusted || !s.session) return;
 
       const ctx = Platform.getCurrentVideo();
-      if (!ctx || ctx.id !== s.session.id || Platform.getLikeState(ctx.likeButton) !== "LIKED") return;
+      if (!ctx || ctx.id !== s.session.id) return;
+      const likeBtn = ctx.likeButton || document.querySelector(CONFIG.platform.playerDigg);
+      if (Platform.getLikeState(likeBtn) !== "LIKED") return;
 
       if (event.type === "keydown") {
         const target = event.target;
@@ -287,10 +313,10 @@
         if ((key !== "z" && key !== "enter" && key !== " ") || event.repeat) return;
       } else {
         const target = event.target;
-        if (!(target instanceof Element) || target.closest(CONFIG.platform.like) !== ctx.likeButton) return;
+        if (!(target instanceof Element)) return;
       }
 
-      s.manualAction = { id: ctx.id, button: ctx.likeButton, time: performance.now() };
+      s.manualAction = { id: ctx.id, button: likeBtn, time: performance.now() };
     },
 
     handleLikeMutation(mutation, target) {
@@ -300,7 +326,7 @@
       const oldState = mutation.oldValue;
       const newState = target.getAttribute("data-e2e-state");
       const ctx = Platform.getCurrentVideo();
-      if (!ctx || ctx.id !== s.session.id || ctx.likeButton !== target) return;
+      if (!ctx || ctx.id !== s.session.id) return;
 
       const session = s.session;
       if (oldState === CONFIG.platform.stateUnliked && newState === CONFIG.platform.stateLiked && session.autoLikeRequested) {
@@ -337,14 +363,16 @@
       t.remainingMs = 0;
     },
 
-    start(minutes) {
+  start(minutes) {
       SleepTimer.stop();
       const t = AppState.timer;
       t.active = true;
       t.remainingMs = minutes * 60_000;
+      let lastState = null; // 记录上一次的播放状态，避免每秒重复刷 DOM
       
       t.tickId = setInterval(() => {
         if (!t.active) return;
+
         const ctx = Platform.getCurrentVideo();
         const isPlaying = ctx ? Platform.isPlaying(ctx.video) : false;
 
@@ -354,9 +382,10 @@
             SleepTimer.finish();
             return;
           }
+          lastState = true;
           UI.setTimerStatus(`剩余 ${formatRemaining(t.remainingMs)}`);
         } else {
-          UI.setTimerStatus("定时已挂起 (视频暂停)");
+          if (lastState !== false) {UI.setTimerStatus("挂起，视频暂停中...");}
         }
       }, CONFIG.timing.playbackTickMs);
 
@@ -369,11 +398,11 @@
       UI.updateTimerUI();
       const ctx = Platform.getCurrentVideo();
       if (!ctx) {
-        UI.setTimerStatus("定时结束（未定位视频）");
+        UI.setTimerStatus("任务中止，检测到非视频页面");
         return;
       }
       ctx.video.pause();
-      UI.setTimerStatus("定时结束已暂停");
+      UI.setTimerStatus("定时结束，任务完成");
     },
   };
 
@@ -407,23 +436,27 @@
         <span id="dy-close">✕</span>
       </div>
       <div id="dy-body">
-        <div id="dy-status">就绪</div>
-        <div id="dy-video">当前视频 ID：未就绪</div>
-        <div id="dy-count"></div>
+        <div id="dy-status">{AppState.session?.status ?? '未启动'}</div>
+        <div id="dy-video">当前识别视频 ID：{AppState.session?.videoId ?? '为空'}</div>
+        <div id="dy-count">今日累计刷视频数据：{AppState.session?.count ?? 0}</div>
         <div class="dy-row">
-          <span>自动点赞</span>
+          <span>启动开关</span>
           <label class="dy-switch"><input id="dy-toggle" type="checkbox" checked><span class="dy-slider"></span></label>
         </div>
         <fieldset id="dy-timer-controls" style="border:none; padding:0; margin:0 0 8px 0;">
           <div class="dy-row">
+            <button type="button" data-minutes="5">5分</button>
             <button type="button" data-minutes="10">10分</button>
+            <button type="button" data-minutes="15">15分</button>
+            <button type="button" data-minutes="20">20分</button>
             <button type="button" data-minutes="30">30分</button>
             <button type="button" data-minutes="60">1小时</button>
+            <button type="button" data-minutes="120">2小时</button>
           </div>
           <div class="dy-row" style="gap: 4px;">
-            <input id="dy-timer-hours" type="number" min="0" value="0">小
+            <input id="dy-timer-hours" type="number" min="0" value="0">时
             <input id="dy-timer-minutes" type="number" min="0" value="0">分
-            <button id="dy-timer-custom" type="button" style="margin:0;">自定义</button>
+            <button id="dy-timer-custom" type="button" style="margin:0;">自定义时间</button>
           </div>
         </fieldset>
         <div class="dy-row">
@@ -463,7 +496,7 @@
       UI.el.status.style.color = color;
     },
 
-    setVideoId: (id) => UI.el.video.textContent = `当前视频ID：${id}`,
+    setVideoId: (id) => UI.el.video.textContent = `当前识别视频 ID：${id}`,
     setTimerStatus: (msg) => UI.el.timerStatus.textContent = msg,
 
     updateTimerUI() {
@@ -477,7 +510,7 @@
       UI.el.dot.style.background = s.running ? "#2ecc71" : "#ff4d4f";
       UI.el.toggle.checked = s.running;
       UI.el.title.textContent = s.collapsed ? (s.running ? "运行中" : "暂停中") : "抖音自动点赞";
-      UI.el.count.textContent = `今日累计刷视频：${Records.getCount()}`;
+      UI.el.count.textContent = `今日累计刷视频数据：${Records.getCount()}`;
     },
 
     bindEvents() {
@@ -544,11 +577,11 @@
     },
   };
 
-  // 初始化流程
+  // UI初始化
   UI.mount();
   UI.bindEvents();
 
-  // 观察 DOM 变动与路由变化
+  // 监听 DOM 变化，触发自动点赞处理
   observe(document.body, { childList: true, subtree: true }, (mutations) => {
     if (mutations.some((m) => !UI.contains(m.target.nodeType === 1 ? m.target : m.target.parentElement))) {
       AutoLike.scheduleProcess();
@@ -568,7 +601,7 @@
     if (check) AutoLike.scheduleProcess();
   });
 
-  // 监听浏览器 History 路由切换
+  // 监听路由变化
   const wrapHistory = (orig) => function (...args) {
     const res = orig.apply(this, args);
     AppState.manualAction = null;
@@ -579,7 +612,7 @@
   history.replaceState = wrapHistory(history.replaceState);
   on(window, "popstate", () => AutoLike.scheduleProcess());
 
-  // 全局交互监听
+  // 监听用户手动操作
   on(document, "pointerdown", AutoLike.markManualAction, { capture: true });
   on(document, "keydown", AutoLike.markManualAction, { capture: true });
   on(document, "visibilitychange", () => {
@@ -590,7 +623,7 @@
     }
   });
 
-  GM_registerMenuCommand("导出今日刷视频数据", Records.export);
+  GM_registerMenuCommand("导出数据", Records.export);
 
   Records.save();
   UI.updateUI();
