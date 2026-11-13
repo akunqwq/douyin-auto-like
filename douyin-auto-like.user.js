@@ -129,8 +129,6 @@
 
     getCurrentVideo() {
       const modalId = Platform.getModalId();
-
-      // 如果处于 modal_id 弹窗状态，优先尝试通过 modal_id 匹配对应的视频播放器
       if (modalId) {
         const modalPlayer = document.querySelector(`[data-e2e-vid="${modalId}"]`) || document.querySelector(CONFIG.platform.activePlayer);
         if (modalPlayer) {
@@ -145,7 +143,7 @@
         }
       }
 
-      // 常规推荐流逻辑
+      // 常规推荐流
       const player = document.querySelector(CONFIG.platform.activePlayer);
       if (!player) return null;
       return Platform.getVideoContext(player);
@@ -586,7 +584,7 @@
       on(el.timerCancel, "click", () => { SleepTimer.stop(); UI.updateTimerUI(); UI.setTimerStatus("已取消"); });
       on(el.close, "click", () => { AppState.collapsed = true; Runtime.panel.classList.add("collapsed"); UI.updateUI(); });
 
-      // 拖拽面板逻辑
+      // 可拖拽面板
       on(el.header, "pointerdown", (e) => {
         if (e.target.closest("#dy-close")) return;
         const rect = Runtime.panel.getBoundingClientRect();
