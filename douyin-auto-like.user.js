@@ -1,13 +1,14 @@
 // ==UserScript==
-// @name         抖音自动点赞
-// @version      2.8.8
-// @description  按实际播放进度累计后点赞，通过 Z 键通道自动点赞，推荐流、首页精选、以及弹窗搜索视频中都能无缝通用、稳定触发。
-// @author       阿鲲
+// @name         抖音视频自动点赞Tampermonkey脚本
+// @version      2.10.0
+// @description  自动点赞当前正在观看的未点赞视频、睡眠定时功能
+// @author       是阿鲲鸭
 // @match        https://www.douyin.com/*
 // @grant        GM_registerMenuCommand
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_addStyle
+// @grant        GM_notification
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -18,6 +19,7 @@
     STORAGE_KEY: "dy_auto_like_data",
     platform: {
       activePlayer: '[data-e2e="feed-active-video"][data-e2e-vid]',
+      live: '[data-e2e="live-slider"]',
       playerDigg: '[data-e2e="video-player-digg"]',
       feedDigg: '[data-e2e="feed-digg"]',
       like: '[data-e2e="video-player-digg"], [data-e2e="feed-digg"]',
@@ -32,6 +34,7 @@
       maxStepSec: 1,
       manualActionWindowMs: 2_000,
       playbackTickMs: 1_000,
+      maxIdleMs: 4 * 60 * 60_000,
       longPressMs: 500,
       dragThresholdPx: 5,
     },
@@ -64,6 +67,7 @@
       active: false,
       remainingMs: 0,
       tickId: null,
+      idleTimeoutId: null,
     },
   };
 
@@ -98,6 +102,8 @@
   const Platform = {
     isPlaying: (video) => !video.paused && !video.ended && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA,
 
+    isLive: (player) => Boolean(player?.querySelector(CONFIG.platform.live)),
+
     findLikeButton: (box) => box?.querySelector(CONFIG.platform.playerDigg) || box?.querySelector(CONFIG.platform.feedDigg),
 
     getLikeState(button) {
@@ -114,6 +120,7 @@
     },
 
     getVideoContext(player) {
+      if (Platform.isLive(player)) return null;
       const id = player.getAttribute("data-e2e-vid")?.trim();
       const video = player.querySelector("video");
       if (!id || !CONFIG.platform.vidPattern.test(id) || !video) return null;
@@ -122,7 +129,7 @@
 
     getCurrentVideo() {
       const modalId = Platform.getModalId();
-      
+
       // 如果处于 modal_id 弹窗状态，优先尝试通过 modal_id 匹配对应的视频播放器
       if (modalId) {
         const modalPlayer = document.querySelector(`[data-e2e-vid="${modalId}"]`) || document.querySelector(CONFIG.platform.activePlayer);
@@ -277,7 +284,7 @@
 
       const activeLikeBtn = likeButton || document.querySelector(CONFIG.platform.playerDigg);
       const state = Platform.getLikeState(activeLikeBtn);
-      
+
       if (state === "LIKED") {
         session.triggered = true;
         s.triggeredIds.add(id);
@@ -355,26 +362,61 @@
   };
 
   const SleepTimer = {
+    notify(text) {
+      GM_notification({ title: "抖音自动点赞", text });
+    },
+
+    clearIdleTimeout() {
+      const t = AppState.timer;
+      clearTimeout(t.idleTimeoutId);
+      t.idleTimeoutId = null;
+    },
+
     stop() {
       const t = AppState.timer;
       clearInterval(t.tickId);
+      SleepTimer.clearIdleTimeout();
       t.tickId = null;
       t.active = false;
       t.remainingMs = 0;
     },
 
-  start(minutes) {
+    syncIdleTimeout(isPlaying) {
+      const t = AppState.timer;
+      if (!t.active || isPlaying) {
+        SleepTimer.clearIdleTimeout();
+        return;
+      }
+      if (t.idleTimeoutId !== null) return;
+
+      t.idleTimeoutId = setTimeout(() => {
+        t.idleTimeoutId = null;
+        if (!t.active) return;
+
+        const ctx = Platform.getCurrentVideo();
+        if (ctx && Platform.isPlaying(ctx.video)) return;
+
+        SleepTimer.stop();
+        UI.updateTimerUI();
+        const message = "连续 4 小时未播放，睡眠定时已终止";
+        UI.setTimerStatus(message);
+        SleepTimer.notify(message);
+      }, CONFIG.timing.maxIdleMs);
+    },
+
+    start(minutes) {
       SleepTimer.stop();
       const t = AppState.timer;
       t.active = true;
       t.remainingMs = minutes * 60_000;
-      let lastState = null; // 记录上一次的播放状态，避免每秒重复刷 DOM
-      
+      let lastState = null;
+
       t.tickId = setInterval(() => {
         if (!t.active) return;
 
         const ctx = Platform.getCurrentVideo();
         const isPlaying = ctx ? Platform.isPlaying(ctx.video) : false;
+        SleepTimer.syncIdleTimeout(isPlaying);
 
         if (isPlaying) {
           t.remainingMs -= CONFIG.timing.playbackTickMs;
@@ -385,12 +427,16 @@
           lastState = true;
           UI.setTimerStatus(`剩余 ${formatRemaining(t.remainingMs)}`);
         } else {
-          if (lastState !== false) {UI.setTimerStatus("挂起，视频暂停中...");}
+          if (lastState !== false) UI.setTimerStatus("挂起，视频暂停中...");
+          lastState = false;
         }
       }, CONFIG.timing.playbackTickMs);
 
       UI.updateTimerUI();
-      UI.setTimerStatus(`剩余 ${formatRemaining(t.remainingMs)}`);
+      const ctx = Platform.getCurrentVideo();
+      const isPlaying = ctx ? Platform.isPlaying(ctx.video) : false;
+      SleepTimer.syncIdleTimeout(isPlaying);
+      UI.setTimerStatus(isPlaying ? `剩余 ${formatRemaining(t.remainingMs)}` : "挂起，视频暂停中...");
     },
 
     finish() {
@@ -398,11 +444,15 @@
       UI.updateTimerUI();
       const ctx = Platform.getCurrentVideo();
       if (!ctx) {
-        UI.setTimerStatus("任务中止，检测到非视频页面");
+        const message = "任务中止，检测到非视频页面";
+        UI.setTimerStatus(message);
+        SleepTimer.notify(message);
         return;
       }
       ctx.video.pause();
-      UI.setTimerStatus("定时结束，任务完成");
+      const message = "定时结束，任务完成";
+      UI.setTimerStatus(message);
+      SleepTimer.notify(message);
     },
   };
 
@@ -436,9 +486,9 @@
         <span id="dy-close">✕</span>
       </div>
       <div id="dy-body">
-        <div id="dy-status">{AppState.session?.status ?? '未启动'}</div>
-        <div id="dy-video">当前识别视频 ID：{AppState.session?.videoId ?? '为空'}</div>
-        <div id="dy-count">今日累计刷视频数据：{AppState.session?.count ?? 0}</div>
+        <div id="dy-status">${AppState.lastStatus || "未启动"}</div>
+        <div id="dy-video">当前识别视频 ID：${AppState.session?.id ?? "为空"}</div>
+        <div id="dy-count">今日累计刷视频数据：${Records.getCount()}</div>
         <div class="dy-row">
           <span>启动开关</span>
           <label class="dy-switch"><input id="dy-toggle" type="checkbox" checked><span class="dy-slider"></span></label>
@@ -450,6 +500,7 @@
             <button type="button" data-minutes="15">15分</button>
             <button type="button" data-minutes="20">20分</button>
             <button type="button" data-minutes="30">30分</button>
+            <button type="button" data-minutes="45">45分</button>
             <button type="button" data-minutes="60">1小时</button>
             <button type="button" data-minutes="120">2小时</button>
           </div>
