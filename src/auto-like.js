@@ -13,7 +13,7 @@
       on(video, "timeupdate", AutoLike.onTimeUpdate);
     },
 
-    getTargetSec: (video) => (video.duration > 0 && video.duration < CONFIG.timing.likeMs / 1000 ? CONFIG.timing.likeShortMs : CONFIG.timing.likeMs) / 1000,
+    getTargetSec: (video) => (video.duration > 0 && video.duration <= CONFIG.timing.likeMs / 1000 ? CONFIG.timing.likeShortMs : CONFIG.timing.likeMs) / 1000,
 
     onTimeUpdate(event) {
       const s = AppState;
