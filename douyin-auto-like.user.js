@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         抖音视频自动点赞Tampermonkey脚本
-// @version      2.11.0
+// @version      2.11.2
 // @description  自动点赞当前正在观看的未点赞视频、睡眠定时功能
 // @author       是阿鲲鸭
 // @match        https://www.douyin.com/*
@@ -14,9 +14,10 @@
 // ==/UserScript==
 
 (function () {
+
   "use strict";
 
-  const CONFIG = {
+const CONFIG = {
     STORAGE_KEY: "dy_auto_like_data",
     platform: {
       activePlayer: '[data-e2e="feed-active-video"][data-e2e-vid]',
@@ -40,10 +41,9 @@
     },
   };
 
-  // 点赞按钮选择器统一由两个来源拼出，避免抖音页面更新导致选择器失效
   CONFIG.platform.like = `${CONFIG.platform.playerDigg}, ${CONFIG.platform.feedDigg}`;
 
-  const formatDate = (date) => [
+const formatDate = (date) => [
     date.getFullYear(),
     String(date.getMonth() + 1).padStart(2, "0"),
     String(date.getDate()).padStart(2, "0"),
@@ -54,8 +54,15 @@
     return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
   };
 
-  const AppState = {
-    running: true,
+  const on = (target, type, handler, options = {}) => {
+    target.addEventListener(type, handler, options);
+  };
+
+  const observe = (target, options, callback) => {
+    new MutationObserver(callback).observe(target, options);
+  };
+
+const AppState = {
     collapsed: true,
     session: null,
     triggeredIds: new Set(),
@@ -75,7 +82,6 @@
     },
   };
 
-  // 初始化加载本地记录
   {
     const saved = GM_getValue(CONFIG.STORAGE_KEY, null);
     if (saved?.date === AppState.today) {
@@ -93,23 +99,11 @@
   }
 
   const Runtime = {
-    controller: new AbortController(),
-    observers: [],
     boundVideos: new WeakSet(),
     panel: null,
   };
 
-  const on = (target, type, handler, options = {}) => {
-    target.addEventListener(type, handler, { ...options, signal: Runtime.controller.signal });
-  };
-
-  const observe = (target, options, callback) => {
-    const observer = new MutationObserver(callback);
-    observer.observe(target, options);
-    Runtime.observers.push(observer);
-  };
-
-  const Platform = {
+const Platform = {
     isPlaying: (video) => !video.paused && !video.ended && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA,
 
     isLive: (player) => Boolean(player?.querySelector(CONFIG.platform.live)),
@@ -117,55 +111,41 @@
     findLikeButton: (box) => box?.querySelector(CONFIG.platform.playerDigg) || box?.querySelector(CONFIG.platform.feedDigg),
 
     getLikeState(button) {
-      // 只有已赞/未赞两态，读不到时按未赞处理
       const state = button?.getAttribute("data-e2e-state");
       if (state === CONFIG.platform.stateLiked) return "LIKED";
       return "UNLIKED";
     },
 
-    getModalId() {
-      const id = new URL(location.href).searchParams.get("modal_id");
-      return id && CONFIG.platform.vidPattern.test(id) ? id : null;
-    },
-
-    getVideoContext(player) {
-      if (Platform.isLive(player)) return null;
+    getVideoContext(player, allowLive = false) {
+      if (!allowLive && Platform.isLive(player)) return null;
       const id = player.getAttribute("data-e2e-vid")?.trim();
       const video = player.querySelector("video");
       if (!id || !CONFIG.platform.vidPattern.test(id) || !video) return null;
       return { id, video, likeButton: Platform.findLikeButton(player) };
     },
 
-    getCurrentVideo() {
-      const modalId = Platform.getModalId();
-      if (modalId) {
-        const modalPlayer = document.querySelector(`[data-e2e-vid="${modalId}"]`) || document.querySelector(CONFIG.platform.activePlayer);
-        if (modalPlayer) {
-          const video = modalPlayer.querySelector("video");
-          if (video) {
-            return {
-              id: modalId,
-              video,
-              likeButton: Platform.findLikeButton(modalPlayer),
-            };
-          }
-        }
+    getCurrentVideo(allowLive = false) {
+      let first = null;
+      for (const player of document.querySelectorAll(CONFIG.platform.activePlayer)) {
+        const ctx = Platform.getVideoContext(player, allowLive);
+        if (!ctx) continue;
+        if (!first) first = ctx;
+        if (Platform.isPlaying(ctx.video)) return ctx;
       }
-
-      // 常规推荐流
-      const player = document.querySelector(CONFIG.platform.activePlayer);
-      if (!player) return null;
-      return Platform.getVideoContext(player);
+      return first;
     },
   };
 
-  const Records = {
+const Records = {
     rolloverIfNeeded() {
       const now = formatDate(new Date());
       if (now === AppState.today) return;
+
       AppState.today = now;
       AppState.records = Object.create(null);
       AppState.cancelled = Object.create(null);
+      AppState.triggeredIds.clear();
+      AppState.session = null;
     },
 
     getCount() {
@@ -191,7 +171,6 @@
       UI.updateUI();
     },
 
-    // 用户手动取消后，当天内该视频不再自动点赞
     cancel(id) {
       Records.rolloverIfNeeded();
       if (AppState.cancelled[id]) return;
@@ -202,6 +181,10 @@
     export() {
       Records.rolloverIfNeeded();
       const ids = Object.keys(AppState.records);
+      if (!ids.length) {
+        GM_notification({ title: "抖音自动点赞", text: "今日暂无可导出的记录" });
+        return;
+      }
       const blob = new Blob([JSON.stringify({ date: AppState.today, total: ids.length, ids }, null, 2)], { type: "application/json" });
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
@@ -212,10 +195,11 @@
         URL.revokeObjectURL(a.href);
         a.remove();
       }, 0);
+      GM_notification({ title: "抖音自动点赞", text: `已导出今日刷视频记录 ${ids.length} 条` });
     },
   };
 
-  const AutoLike = {
+const AutoLike = {
     pressZ() {
       const options = { key: "z", code: "KeyZ", keyCode: 90, which: 90, bubbles: true, cancelable: true };
       document.dispatchEvent(new KeyboardEvent("keydown", options));
@@ -235,7 +219,7 @@
     onTimeUpdate(event) {
       const s = AppState;
       const session = s.session;
-      if (!s.running || !session || session.cancelled || session.triggered || document.hidden) return;
+      if (!session || session.cancelled || s.cancelled[session.id] || session.triggered || document.hidden) return;
 
       const ctx = Platform.getCurrentVideo();
       if (!ctx || ctx.video !== event.currentTarget || ctx.id !== session.id || !Platform.isPlaying(ctx.video)) {
@@ -259,13 +243,11 @@
     },
 
     createSession(id) {
-      const cancelled = Boolean(AppState.cancelled[id]);
       AppState.session = {
         id,
-        triggered: AppState.triggeredIds.has(id) || cancelled,
-        cancelled,
+        triggered: AppState.triggeredIds.has(id),
+        cancelled: false,
         autoLikeRequested: false,
-        autoLiked: false,
         watchedSec: 0,
         lastTime: null,
       };
@@ -274,12 +256,17 @@
 
     fireAutoLike(id) {
       const session = AppState.session;
-      if (!session || session.id !== id || !AppState.running || session.cancelled || session.triggered) return;
+      if (!session || session.id !== id || session.cancelled || AppState.cancelled[id] || session.triggered) return;
 
       const ctx = Platform.getCurrentVideo();
       if (!ctx || ctx.id !== id || !Platform.isPlaying(ctx.video)) return;
 
-      if (Platform.getLikeState(ctx.likeButton) !== "UNLIKED") return;
+      if (Platform.getLikeState(ctx.likeButton) === "LIKED") {
+        session.triggered = true;
+        AppState.triggeredIds.add(id);
+        UI.setStatus(`视频 ${id}：已点赞，跳过自动点赞`, "#fe2c55");
+        return;
+      }
 
       session.triggered = true;
       session.autoLikeRequested = true;
@@ -287,14 +274,12 @@
       AutoLike.pressZ();
       UI.setStatus(`视频 ${id}：已发送 Z，等待确认`, "#fe2c55");
 
-      // 2 秒后仍未确认则提示失败，不自动重试，避免二次 toggle
       setTimeout(() => {
         if (AppState.session !== session || !session.autoLikeRequested) return;
         session.autoLikeRequested = false;
         const current = Platform.getCurrentVideo();
         if (!current || current.id !== id) return;
         if (Platform.getLikeState(current.likeButton) === "LIKED") {
-          session.autoLiked = true;
           UI.setStatus(`视频 ${id}：已点赞`, "#fe2c55");
           UI.updateUI();
         } else {
@@ -305,10 +290,8 @@
 
     process() {
       const s = AppState;
-      if (!s.running) {
-        UI.setStatus("自动点赞已停止", "#999");
-        return;
-      }
+      Records.rolloverIfNeeded();
+
       if (document.hidden) return;
 
       const ctx = Platform.getCurrentVideo();
@@ -317,15 +300,19 @@
       const { id, video } = ctx;
       UI.setVideoId(id);
 
+      if (s.cancelled[id]) {
+        if (s.session?.id === id) {
+          s.session.cancelled = true;
+          s.session.autoLikeRequested = false;
+        }
+        UI.setStatus(`视频 ${id}：已手动取消，今日不再处理该视频`, "#999");
+        return;
+      }
+
       if (!s.session || s.session.id !== id) AutoLike.createSession(id);
       AutoLike.attachVideoEvents(video);
 
       const session = s.session;
-
-      if (session.cancelled) {
-        UI.setStatus(`视频 ${id}：已手动取消，今日不再自动点赞`, "#999");
-        return;
-      }
       if (session.triggered) return;
 
       const state = Platform.getLikeState(ctx.likeButton);
@@ -335,12 +322,12 @@
         UI.setStatus(`视频 ${id}：已点赞，跳过`, "#fe2c55");
         return;
       }
+
       UI.setStatus(`视频 ${id}：累计播放 ${AutoLike.getTargetSec(video)} 秒后点赞`);
     },
 
     scheduleProcess() {
       if (AppState.frame) return;
-      // 合并高频 DOM 变化，最多每 200ms 处理一次，避免每帧重复查询 DOM
       const delay = Math.max(0, 200 - (performance.now() - AppState.lastProcessAt));
       AppState.frame = setTimeout(() => {
         AppState.frame = 0;
@@ -350,37 +337,36 @@
     },
 
     handleLikeMutation(mutation, target) {
+      Records.rolloverIfNeeded();
+
       const s = AppState;
-      if (!s.running || !s.session) return;
+      if (!s.session) return;
 
       const session = s.session;
       const oldState = mutation.oldValue;
       const newState = target.getAttribute("data-e2e-state");
       const ctx = Platform.getCurrentVideo();
-      if (!ctx || ctx.id !== session.id) return;
+      if (!ctx || ctx.id !== session.id || s.cancelled[ctx.id]) return;
 
       if (oldState === CONFIG.platform.stateUnliked && newState === CONFIG.platform.stateLiked && session.autoLikeRequested) {
         session.autoLikeRequested = false;
-        session.autoLiked = true;
         UI.setStatus(`视频 ${ctx.id}：已点赞`, "#fe2c55");
         UI.updateUI();
         return;
       }
 
-      // 脚本只会点赞、不会取消，因此 LIKED → UNLIKED 一律视为用户手动取消
       if (oldState === CONFIG.platform.stateLiked && newState === CONFIG.platform.stateUnliked) {
         session.cancelled = true;
-        session.autoLiked = false;
         session.autoLikeRequested = false;
         s.triggeredIds.delete(ctx.id);
         Records.cancel(ctx.id);
-        UI.setStatus(`视频 ${ctx.id}：已手动取消，今日不再自动点赞`, "#999");
+        UI.setStatus(`视频 ${ctx.id}：已手动取消，今日不再处理该视频`, "#999");
         UI.updateUI();
       }
     },
   };
 
-  const SleepTimer = {
+const SleepTimer = {
     notify(text) {
       GM_notification({ title: "抖音自动点赞", text });
     },
@@ -412,7 +398,7 @@
         t.idleTimeoutId = null;
         if (!t.active) return;
 
-        const ctx = Platform.getCurrentVideo();
+        const ctx = Platform.getCurrentVideo(true);
         if (ctx && Platform.isPlaying(ctx.video)) return;
 
         SleepTimer.stop();
@@ -435,11 +421,10 @@
         if (!t.active) return;
 
         const now = performance.now();
-        // 按真实经过时间扣减，规避 setInterval 漂移；单次最多计 5 秒，避免休眠/节流后瞬跳
         const elapsed = Math.max(0, Math.min(now - lastTick, CONFIG.timing.playbackTickMs * 5));
         lastTick = now;
 
-        const ctx = Platform.getCurrentVideo();
+        const ctx = Platform.getCurrentVideo(true);
         const isPlaying = ctx ? Platform.isPlaying(ctx.video) : false;
         SleepTimer.syncIdleTimeout(isPlaying);
 
@@ -458,7 +443,7 @@
       }, CONFIG.timing.playbackTickMs);
 
       UI.updateTimerUI();
-      const ctx = Platform.getCurrentVideo();
+      const ctx = Platform.getCurrentVideo(true);
       const isPlaying = ctx ? Platform.isPlaying(ctx.video) : false;
       SleepTimer.syncIdleTimeout(isPlaying);
       UI.setTimerStatus(isPlaying ? `剩余 ${formatRemaining(t.remainingMs)}` : "挂起，视频暂停中...");
@@ -467,80 +452,85 @@
     finish() {
       SleepTimer.stop();
       UI.updateTimerUI();
-      const ctx = Platform.getCurrentVideo();
-      if (!ctx) {
-        const message = "任务中止，检测到非视频页面";
-        UI.setTimerStatus(message);
-        SleepTimer.notify(message);
-        return;
-      }
-      ctx.video.pause();
+      Platform.getCurrentVideo(true)?.video.pause();
       const message = "定时结束，任务完成";
       UI.setTimerStatus(message);
       SleepTimer.notify(message);
     },
   };
 
-  const UI = {
+const UI = {
     el: {},
     css: `
-      #dy-panel { position: fixed; right: 20px; bottom: 20px; z-index: 999999; width: 240px; border-radius: 14px; background: rgba(20,20,22,.94); color: #fff; font: 13px/1.6 sans-serif; box-shadow: 0 8px 28px rgba(0,0,0,.35); user-select: none; overflow: hidden; }
-      #dy-panel.collapsed { width: auto; border-radius: 999px; }
-      #dy-panel.collapsed #dy-body, #dy-panel.collapsed #dy-close { display: none; }
-      #dy-header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; cursor: move; }
-      #dy-dot { width: 9px; height: 9px; flex: none; border-radius: 50%; }
-      #dy-title { flex: 1; overflow: hidden; white-space: nowrap; }
-      #dy-body { padding: 0 12px 12px; }
-      #dy-status, #dy-video, #dy-count { font-size: 11px; overflow-wrap: anywhere; margin-bottom: 6px; }
-      #dy-video, #dy-count { opacity: .75; }
-      .dy-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
-      .dy-switch { position: relative; display: inline-block; width: 44px; height: 26px; }
-      .dy-switch input { opacity: 0; width: 0; height: 0; }
-      .dy-slider { position: absolute; inset: 0; cursor: pointer; border-radius: 26px; background: #5a5a5e; transition: .2s; }
-      .dy-slider:before { content: ""; position: absolute; left: 2px; bottom: 2px; width: 22px; height: 22px; border-radius: 50%; background: #fff; transition: .2s; }
-      .dy-switch input:checked + .dy-slider { background: #41ff6a; }
-      .dy-switch input:checked + .dy-slider:before { transform: translateX(18px); }
-      #dy-close { cursor: pointer; opacity: .7; }
-      #dy-timer-controls button, #dy-timer-custom { flex: 1; margin: 2px; padding: 4px; background: #2c2c30; border: none; color: #fff; border-radius: 4px; cursor: pointer; }
-      #dy-timer-controls input { width: 40px; background: #2c2c30; border: 1px solid #444; color: #fff; text-align: center; border-radius: 4px; }
-    `,
+#dy-panel { position: fixed; right: 20px; bottom: 20px; z-index: 999999; width: 280px; border-radius: 14px; background: rgba(20,20,22,.94); color: #fff; font: 13px/1.6 sans-serif; box-shadow: 0 8px 28px rgba(0,0,0,.35); user-select: none; overflow: hidden; }
+#dy-panel.collapsed { width: auto; border-radius: 999px; }
+#dy-panel.collapsed #dy-body, #dy-panel.collapsed #dy-close { display: none; }
+#dy-header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; cursor: move; }
+#dy-dot { width: 9px; height: 9px; flex: none; border-radius: 50%; background: #2ecc71; }
+#dy-title { flex: 1; overflow: hidden; white-space: nowrap; }
+#dy-body { padding: 0 12px 12px; }
+.dy-section { padding: 10px 0; border-top: 1px solid rgba(255,255,255,.08); }
+.dy-section:first-child { border-top: none; padding-top: 2px; }
+.dy-label { font-size: 11px; opacity: .55; margin-bottom: 2px; }
+.dy-value { font-size: 12px; overflow-wrap: anywhere; }
+.dy-value + .dy-label, .dy-value + .dy-row { margin-top: 8px; }
+.dy-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.dy-row .dy-label { margin-bottom: 0; }
+#dy-close { cursor: pointer; opacity: .7; }
+#dy-timer-controls { border: none; padding: 0; margin: 0; }
+.dy-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 6px 0; }
+.dy-grid button, .dy-custom button { padding: 5px 0; background: #2c2c30; border: none; color: #fff; border-radius: 6px; cursor: pointer; }
+.dy-custom { display: flex; align-items: center; gap: 6px; margin: 6px 0; }
+.dy-custom input { width: 46px; padding: 5px 4px; background: #2c2c30; border: 1px solid #444; color: #fff; text-align: center; border-radius: 6px; }
+.dy-custom button { flex: 1; }
+#dy-timer-status { font-size: 12px; opacity: .75; flex: 1; }
+#dy-timer-toggle { background: #ff4d4f; border: none; color: #fff; padding: 3px 10px; border-radius: 6px; cursor: pointer; }
+`,
     html: `
-      <div id="dy-header">
-        <span id="dy-dot"></span>
-        <span id="dy-title">抖音自动点赞</span>
-        <span id="dy-close">✕</span>
+<div id="dy-header">
+  <span id="dy-dot"></span>
+  <span id="dy-title">抖音自动点赞</span>
+  <span id="dy-close">✕</span>
+</div>
+<div id="dy-body">
+  <div class="dy-section">
+    <div class="dy-label">运行状态</div>
+    <div class="dy-value" id="dy-status">未启动</div>
+    <div class="dy-label">当前视频</div>
+    <div class="dy-value" id="dy-video">为空</div>
+    <div class="dy-row">
+      <span class="dy-label">今日识别</span>
+      <span class="dy-value" id="dy-count">0 条</span>
+    </div>
+  </div>
+  <div class="dy-section">
+    <div class="dy-label">播放定时</div>
+    <fieldset id="dy-timer-controls">
+      <div class="dy-grid">
+        <button type="button" data-minutes="5">5分钟</button>
+        <button type="button" data-minutes="10">10分钟</button>
+        <button type="button" data-minutes="15">15分钟</button>
+        <button type="button" data-minutes="20">20分钟</button>
+        <button type="button" data-minutes="30">30分钟</button>
+        <button type="button" data-minutes="45">45分钟</button>
+        <button type="button" data-minutes="60">1小时</button>
+        <button type="button" data-minutes="120">2小时</button>
       </div>
-      <div id="dy-body">
-        <div id="dy-status">未启动</div>
-        <div id="dy-video">当前识别视频 ID：为空</div>
-        <div id="dy-count">今日累计刷视频数据：0</div>
-        <div class="dy-row">
-          <span>启动开关</span>
-          <label class="dy-switch"><input id="dy-toggle" type="checkbox" checked><span class="dy-slider"></span></label>
-        </div>
-        <fieldset id="dy-timer-controls" style="border:none; padding:0; margin:0 0 8px 0;">
-          <div class="dy-row">
-            <button type="button" data-minutes="5">5分</button>
-            <button type="button" data-minutes="10">10分</button>
-            <button type="button" data-minutes="15">15分</button>
-            <button type="button" data-minutes="20">20分</button>
-            <button type="button" data-minutes="30">30分</button>
-            <button type="button" data-minutes="45">45分</button>
-            <button type="button" data-minutes="60">1小时</button>
-            <button type="button" data-minutes="120">2小时</button>
-          </div>
-          <div class="dy-row" style="gap: 4px;">
-            <input id="dy-timer-hours" type="number" min="0" value="0">时
-            <input id="dy-timer-minutes" type="number" min="0" value="0">分
-            <button id="dy-timer-custom" type="button" style="margin:0;">自定义时间</button>
-          </div>
-        </fieldset>
-        <div class="dy-row">
-          <span id="dy-timer-status" style="font-size:11px; opacity:.75;">未启动</span>
-          <button id="dy-timer-toggle" type="button" style="background:#ff4d4f; border:none; color:#fff; padding:2px 8px; border-radius:4px; cursor:pointer;" hidden>取消</button>
-        </div>
+      <div class="dy-label">自定义时长</div>
+      <div class="dy-custom">
+        <input id="dy-timer-hours" type="number" min="0" value="0">时
+        <input id="dy-timer-minutes" type="number" min="0" value="0">分
+        <button id="dy-timer-custom" type="button">开始定时</button>
       </div>
-    `,
+    </fieldset>
+    <div class="dy-label">定时状态</div>
+    <div class="dy-row">
+      <span id="dy-timer-status">未启动</span>
+      <button id="dy-timer-toggle" type="button" hidden>取消</button>
+    </div>
+  </div>
+</div>
+`,
 
     mount() {
       GM_addStyle(UI.css);
@@ -554,16 +544,15 @@
       const $ = (s) => panel.querySelector(s);
       UI.el = {
         panel, status: $("#dy-status"), video: $("#dy-video"), count: $("#dy-count"),
-        title: $("#dy-title"), dot: $("#dy-dot"), toggle: $("#dy-toggle"),
-        timerControls: $("#dy-timer-controls"), timerHours: $("#dy-timer-hours"),
+        title: $("#dy-title"), timerControls: $("#dy-timer-controls"), timerHours: $("#dy-timer-hours"),
         timerMinutes: $("#dy-timer-minutes"), timerCustom: $("#dy-timer-custom"),
         timerCancel: $("#dy-timer-toggle"), timerStatus: $("#dy-timer-status"),
         close: $("#dy-close"), header: $("#dy-header"),
       };
 
       UI.el.status.textContent = AppState.lastStatus || "未启动";
-      UI.el.video.textContent = `当前识别视频 ID：${AppState.session?.id ?? "为空"}`;
-      UI.el.count.textContent = `今日累计刷视频数据：${Records.getCount()}`;
+      UI.el.video.textContent = AppState.session?.id ?? "为空";
+      UI.el.count.textContent = `${Records.getCount()} 条`;
     },
 
     contains: (node) => Boolean(node && (node === Runtime.panel || Runtime.panel.contains(node))),
@@ -577,9 +566,9 @@
     },
 
     setVideoId(id) {
-      const text = `当前识别视频 ID：${id}`;
-      if (UI.el.video.textContent !== text) UI.el.video.textContent = text;
+      if (UI.el.video.textContent !== id) UI.el.video.textContent = id;
     },
+
     setTimerStatus: (msg) => UI.el.timerStatus.textContent = msg,
 
     updateTimerUI() {
@@ -589,21 +578,12 @@
     },
 
     updateUI() {
-      const s = AppState;
-      UI.el.dot.style.background = s.running ? "#2ecc71" : "#ff4d4f";
-      UI.el.toggle.checked = s.running;
-      UI.el.title.textContent = s.collapsed ? (s.running ? "运行中" : "暂停中") : "抖音自动点赞";
-      UI.el.count.textContent = `今日累计刷视频数据：${Records.getCount()}`;
+      UI.el.title.textContent = AppState.collapsed ? "运行中" : "抖音自动点赞";
+      UI.el.count.textContent = `${Records.getCount()} 条`;
     },
 
     bindEvents() {
       const el = UI.el;
-      on(el.toggle, "change", () => {
-        AppState.running = el.toggle.checked;
-        UI.updateUI();
-        AutoLike.process();
-      });
-
       on(el.timerControls, "click", (e) => {
         const btn = e.target.closest("[data-minutes]");
         if (btn) SleepTimer.start(Number(btn.dataset.minutes));
@@ -621,7 +601,6 @@
       on(el.timerCancel, "click", () => { SleepTimer.stop(); UI.updateTimerUI(); UI.setTimerStatus("已取消"); });
       on(el.close, "click", () => { AppState.collapsed = true; Runtime.panel.classList.add("collapsed"); UI.updateUI(); });
 
-      // 可拖拽面板
       on(el.header, "pointerdown", (e) => {
         if (e.target.closest("#dy-close")) return;
         const rect = Runtime.panel.getBoundingClientRect();
@@ -663,11 +642,9 @@
     },
   };
 
-  // UI初始化
-  UI.mount();
+UI.mount();
   UI.bindEvents();
 
-  // 监听 DOM 变化，触发自动点赞处理
   observe(document.body, { childList: true, subtree: true }, (mutations) => {
     if (mutations.some((m) => !UI.contains(m.target.nodeType === 1 ? m.target : m.target.parentElement))) {
       AutoLike.scheduleProcess();
@@ -687,12 +664,12 @@
     if (check) AutoLike.scheduleProcess();
   });
 
-  // 监听路由变化
   const wrapHistory = (orig) => function (...args) {
     const res = orig.apply(this, args);
     AutoLike.scheduleProcess();
     return res;
   };
+
   history.pushState = wrapHistory(history.pushState);
   history.replaceState = wrapHistory(history.replaceState);
   on(window, "popstate", () => AutoLike.scheduleProcess());
@@ -705,9 +682,10 @@
     }
   });
 
-  GM_registerMenuCommand("导出数据", Records.export);
+  GM_registerMenuCommand("导出今日刷视频记录", Records.export);
 
   Records.save();
   UI.updateUI();
   AutoLike.process();
+
 })();

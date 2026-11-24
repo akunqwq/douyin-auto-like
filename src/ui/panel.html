@@ -1,0 +1,43 @@
+<div id="dy-header">
+  <span id="dy-dot"></span>
+  <span id="dy-title">抖音自动点赞</span>
+  <span id="dy-close">✕</span>
+</div>
+<div id="dy-body">
+  <div class="dy-section">
+    <div class="dy-label">运行状态</div>
+    <div class="dy-value" id="dy-status">未启动</div>
+    <div class="dy-label">当前视频</div>
+    <div class="dy-value" id="dy-video">为空</div>
+    <div class="dy-row">
+      <span class="dy-label">今日识别</span>
+      <span class="dy-value" id="dy-count">0 条</span>
+    </div>
+  </div>
+  <div class="dy-section">
+    <div class="dy-label">播放定时</div>
+    <fieldset id="dy-timer-controls">
+      <div class="dy-grid">
+        <button type="button" data-minutes="5">5分钟</button>
+        <button type="button" data-minutes="10">10分钟</button>
+        <button type="button" data-minutes="15">15分钟</button>
+        <button type="button" data-minutes="20">20分钟</button>
+        <button type="button" data-minutes="30">30分钟</button>
+        <button type="button" data-minutes="45">45分钟</button>
+        <button type="button" data-minutes="60">1小时</button>
+        <button type="button" data-minutes="120">2小时</button>
+      </div>
+      <div class="dy-label">自定义时长</div>
+      <div class="dy-custom">
+        <input id="dy-timer-hours" type="number" min="0" value="0">时
+        <input id="dy-timer-minutes" type="number" min="0" value="0">分
+        <button id="dy-timer-custom" type="button">开始定时</button>
+      </div>
+    </fieldset>
+    <div class="dy-label">定时状态</div>
+    <div class="dy-row">
+      <span id="dy-timer-status">未启动</span>
+      <button id="dy-timer-toggle" type="button" hidden>取消</button>
+    </div>
+  </div>
+</div>

@@ -1,0 +1,23 @@
+#dy-panel { position: fixed; right: 20px; bottom: 20px; z-index: 999999; width: 280px; border-radius: 14px; background: rgba(20,20,22,.94); color: #fff; font: 13px/1.6 sans-serif; box-shadow: 0 8px 28px rgba(0,0,0,.35); user-select: none; overflow: hidden; }
+#dy-panel.collapsed { width: auto; border-radius: 999px; }
+#dy-panel.collapsed #dy-body, #dy-panel.collapsed #dy-close { display: none; }
+#dy-header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; cursor: move; }
+#dy-dot { width: 9px; height: 9px; flex: none; border-radius: 50%; background: #2ecc71; }
+#dy-title { flex: 1; overflow: hidden; white-space: nowrap; }
+#dy-body { padding: 0 12px 12px; }
+.dy-section { padding: 10px 0; border-top: 1px solid rgba(255,255,255,.08); }
+.dy-section:first-child { border-top: none; padding-top: 2px; }
+.dy-label { font-size: 11px; opacity: .55; margin-bottom: 2px; }
+.dy-value { font-size: 12px; overflow-wrap: anywhere; }
+.dy-value + .dy-label, .dy-value + .dy-row { margin-top: 8px; }
+.dy-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.dy-row .dy-label { margin-bottom: 0; }
+#dy-close { cursor: pointer; opacity: .7; }
+#dy-timer-controls { border: none; padding: 0; margin: 0; }
+.dy-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 6px 0; }
+.dy-grid button, .dy-custom button { padding: 5px 0; background: #2c2c30; border: none; color: #fff; border-radius: 6px; cursor: pointer; }
+.dy-custom { display: flex; align-items: center; gap: 6px; margin: 6px 0; }
+.dy-custom input { width: 46px; padding: 5px 4px; background: #2c2c30; border: 1px solid #444; color: #fff; text-align: center; border-radius: 6px; }
+.dy-custom button { flex: 1; }
+#dy-timer-status { font-size: 12px; opacity: .75; flex: 1; }
+#dy-timer-toggle { background: #ff4d4f; border: none; color: #fff; padding: 3px 10px; border-radius: 6px; cursor: pointer; }

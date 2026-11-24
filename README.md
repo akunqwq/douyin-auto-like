@@ -1,4 +1,5 @@
 # 抖音视频自动点赞Tampermonkey脚本
+
 抖音官方原生快捷键通道实现，支持官方没有的睡眠定时功能。
 
 ## 特性
@@ -9,7 +10,7 @@
 - 今日刷视频ID数据可导出，方便用户分析（只保留一天）。
 - 睡眠定时功能：快捷预设 + 自定义时间写入。
 
-## ⚠️温馨提示 
+## ⚠️温馨提示
 
 抖音会根据「喜欢」优化推荐，脚本连续点赞可能改变你后续刷到的内容，影响程度因人而异，介意请谨慎使用！
 
@@ -20,7 +21,23 @@
 
    [点击安装脚本](https://raw.githubusercontent.com/akunqwq/douyin-auto-like/main/douyin-auto-like.user.js)
 
+## 开发
 
+源码按模块拆分为 `src/` 目录，运行 `node build.js` 合并生成最新安装文件。
+
+```
+src/
+├── header.txt       # UserScript 元数据头
+├── config.js        # 选择器与时间配置
+├── utils.js         # 通用工具函数
+├── state.js         # 全局状态与存储读取
+├── platform.js      # 抖音页面识别
+├── records.js       # 当日记录与导出
+├── auto-like.js     # 自动点赞核心逻辑
+├── sleep-timer.js   # 睡眠定时
+├── ui/              # 面板样式、结构与交互
+└── init.js          # 初始化与事件注册
+```
 
 ## 免责声明
 
