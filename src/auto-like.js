@@ -13,12 +13,21 @@
       on(video, "timeupdate", AutoLike.onTimeUpdate);
     },
 
-    getTargetSec: (video) => (video.duration > 0 && video.duration <= CONFIG.timing.likeMs / 1000 ? CONFIG.timing.likeShortMs : CONFIG.timing.likeMs) / 1000,
+    getTargetSec(video) {
+      const fullSec = CONFIG.timing.likeMs / 1000;
+      const shortSec = CONFIG.timing.likeShortMs / 1000;
+      const dur = video.duration;
+      if (!Number.isFinite(dur) || dur <= 0) return fullSec;
+      // 抖音时长显示取整：UI 显示 0:10 的视频实际 duration 常是 10.04 / 10.2，
+      // 严格 <= fullSec 会把这些漏判到 long 档，用 round 容忍 ±0.5s 误差
+      const target = Math.round(dur) <= fullSec ? shortSec : fullSec;
+      // 比目标还短的视频（如 2 秒），不能让它等 3 秒触发，留 duration-0.5 兜底
+      return Math.min(target, Math.max(dur - 0.5, 0.5));
+    },
 
     onTimeUpdate(event) {
-      const s = AppState;
-      const session = s.session;
-      if (!session || session.cancelled || s.cancelled[session.id] || session.triggered || document.hidden) return;
+      const session = AppState.session;
+      if (!session || session.triggered || document.hidden) return;
 
       const ctx = Platform.getCurrentVideo();
       if (!ctx || ctx.video !== event.currentTarget || ctx.id !== session.id || !Platform.isPlaying(ctx.video)) {
@@ -44,8 +53,7 @@
     createSession(id) {
       AppState.session = {
         id,
-        triggered: AppState.triggeredIds.has(id),
-        cancelled: false,
+        triggered: false,
         autoLikeRequested: false,
         watchedSec: 0,
         lastTime: null,
@@ -55,23 +63,21 @@
 
     fireAutoLike(id) {
       const session = AppState.session;
-      if (!session || session.id !== id || session.cancelled || AppState.cancelled[id] || session.triggered) return;
+      if (!session || session.id !== id || session.triggered) return;
 
       const ctx = Platform.getCurrentVideo();
       if (!ctx || ctx.id !== id || !Platform.isPlaying(ctx.video)) return;
 
       if (Platform.getLikeState(ctx.likeButton) === "LIKED") {
         session.triggered = true;
-        AppState.triggeredIds.add(id);
-        UI.setStatus(`视频 ${id}：已点赞，跳过自动点赞`, "#fe2c55");
+        UI.setStatus("已点赞，跳过自动点赞", "#fe2c55");
         return;
       }
 
       session.triggered = true;
       session.autoLikeRequested = true;
-      AppState.triggeredIds.add(id);
       AutoLike.pressZ();
-      UI.setStatus(`视频 ${id}：已发送 Z，等待确认`, "#fe2c55");
+      UI.setStatus("已发送 Z，等待确认", "#fe2c55");
 
       setTimeout(() => {
         if (AppState.session !== session || !session.autoLikeRequested) return;
@@ -79,16 +85,15 @@
         const current = Platform.getCurrentVideo();
         if (!current || current.id !== id) return;
         if (Platform.getLikeState(current.likeButton) === "LIKED") {
-          UI.setStatus(`视频 ${id}：已点赞`, "#fe2c55");
+          UI.setStatus("已点赞", "#fe2c55");
           UI.updateUI();
         } else {
-          UI.setStatus(`视频 ${id}：未确认到点赞，请手动点赞`, "#f5a623");
+          UI.setStatus("未确认到点赞，请手动点赞", "#f5a623");
         }
       }, CONFIG.timing.confirmWindowMs);
     },
 
     process() {
-      const s = AppState;
       Records.rolloverIfNeeded();
 
       if (document.hidden) return;
@@ -97,32 +102,20 @@
       if (!ctx) return;
 
       const { id, video } = ctx;
-      UI.setVideoId(id);
 
-      if (s.cancelled[id]) {
-        if (s.session?.id === id) {
-          s.session.cancelled = true;
-          s.session.autoLikeRequested = false;
-        }
-        UI.setStatus(`视频 ${id}：已手动取消，今日不再处理该视频`, "#999");
-        return;
-      }
-
-      if (!s.session || s.session.id !== id) AutoLike.createSession(id);
+      if (!AppState.session || AppState.session.id !== id) AutoLike.createSession(id);
       AutoLike.attachVideoEvents(video);
 
-      const session = s.session;
+      const session = AppState.session;
       if (session.triggered) return;
 
-      const state = Platform.getLikeState(ctx.likeButton);
-      if (state === "LIKED") {
+      if (Platform.getLikeState(ctx.likeButton) === "LIKED") {
         session.triggered = true;
-        s.triggeredIds.add(id);
-        UI.setStatus(`视频 ${id}：已点赞，跳过`, "#fe2c55");
+        UI.setStatus("已点赞，跳过", "#fe2c55");
         return;
       }
 
-      UI.setStatus(`视频 ${id}：累计播放 ${AutoLike.getTargetSec(video)} 秒后点赞`);
+      UI.setStatus(`累计播放 ${AutoLike.getTargetSec(video)} 秒后点赞`);
     },
 
     scheduleProcess() {
@@ -138,29 +131,25 @@
     handleLikeMutation(mutation, target) {
       Records.rolloverIfNeeded();
 
-      const s = AppState;
-      if (!s.session) return;
+      const session = AppState.session;
+      if (!session) return;
 
-      const session = s.session;
       const oldState = mutation.oldValue;
       const newState = target.getAttribute("data-e2e-state");
       const ctx = Platform.getCurrentVideo();
-      if (!ctx || ctx.id !== session.id || s.cancelled[ctx.id]) return;
+      if (!ctx || ctx.id !== session.id) return;
 
       if (oldState === CONFIG.platform.stateUnliked && newState === CONFIG.platform.stateLiked && session.autoLikeRequested) {
         session.autoLikeRequested = false;
-        UI.setStatus(`视频 ${ctx.id}：已点赞`, "#fe2c55");
+        UI.setStatus("已点赞", "#fe2c55");
         UI.updateUI();
         return;
       }
 
       if (oldState === CONFIG.platform.stateLiked && newState === CONFIG.platform.stateUnliked) {
-        session.cancelled = true;
+        session.triggered = true;
         session.autoLikeRequested = false;
-        s.triggeredIds.delete(ctx.id);
-        Records.cancel(ctx.id);
-        UI.setStatus(`视频 ${ctx.id}：已手动取消，今日不再处理该视频`, "#999");
-        UI.updateUI();
+        UI.setStatus("已手动取消，本次观看不再处理", "#999");
       }
     },
   };

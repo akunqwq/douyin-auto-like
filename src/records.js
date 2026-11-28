@@ -5,8 +5,6 @@
 
       AppState.today = now;
       AppState.records = Object.create(null);
-      AppState.cancelled = Object.create(null);
-      AppState.triggeredIds.clear();
       AppState.session = null;
     },
 
@@ -18,10 +16,9 @@
     save() {
       Records.rolloverIfNeeded();
       GM_setValue(CONFIG.STORAGE_KEY, {
-        version: 2,
+        version: 3,
         date: AppState.today,
         records: AppState.records,
-        cancelled: AppState.cancelled,
       });
     },
 
@@ -31,13 +28,6 @@
       AppState.records[id] = true;
       Records.save();
       UI.updateUI();
-    },
-
-    cancel(id) {
-      Records.rolloverIfNeeded();
-      if (AppState.cancelled[id]) return;
-      AppState.cancelled[id] = true;
-      Records.save();
     },
 
     export() {

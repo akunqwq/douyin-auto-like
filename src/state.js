@@ -1,8 +1,6 @@
   const AppState = {
     collapsed: true,
     session: null,
-    triggeredIds: new Set(),
-    cancelled: Object.create(null),
     frame: 0,
     lastProcessAt: 0,
     today: formatDate(new Date()),
@@ -24,11 +22,6 @@
       if (saved.records && typeof saved.records === "object") {
         for (const [id, viewed] of Object.entries(saved.records)) {
           if (viewed && CONFIG.platform.vidPattern.test(id)) AppState.records[id] = true;
-        }
-      }
-      if (saved.cancelled && typeof saved.cancelled === "object") {
-        for (const [id, flagged] of Object.entries(saved.cancelled)) {
-          if (flagged && CONFIG.platform.vidPattern.test(id)) AppState.cancelled[id] = true;
         }
       }
     }

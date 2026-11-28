@@ -14,7 +14,7 @@
 
       const $ = (s) => panel.querySelector(s);
       UI.el = {
-        panel, status: $("#dy-status"), video: $("#dy-video"), count: $("#dy-count"),
+        panel, status: $("#dy-status"), count: $("#dy-count"),
         title: $("#dy-title"), timerControls: $("#dy-timer-controls"), timerHours: $("#dy-timer-hours"),
         timerMinutes: $("#dy-timer-minutes"), timerCustom: $("#dy-timer-custom"),
         timerCancel: $("#dy-timer-toggle"), timerStatus: $("#dy-timer-status"),
@@ -22,7 +22,6 @@
       };
 
       UI.el.status.textContent = AppState.lastStatus || "未启动";
-      UI.el.video.textContent = AppState.session?.id ?? "为空";
       UI.el.count.textContent = `${Records.getCount()} 条`;
     },
 
@@ -34,10 +33,6 @@
       AppState.lastColor = color;
       UI.el.status.textContent = message;
       UI.el.status.style.color = color;
-    },
-
-    setVideoId(id) {
-      if (UI.el.video.textContent !== id) UI.el.video.textContent = id;
     },
 
     setTimerStatus: (msg) => UI.el.timerStatus.textContent = msg,
