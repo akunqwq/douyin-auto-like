@@ -20,8 +20,8 @@
     const saved = GM_getValue(CONFIG.STORAGE_KEY, null);
     if (saved?.date === AppState.today) {
       if (saved.records && typeof saved.records === "object") {
-        for (const [id, viewed] of Object.entries(saved.records)) {
-          if (viewed && CONFIG.platform.vidPattern.test(id)) AppState.records[id] = true;
+        for (const [id, seen] of Object.entries(saved.records)) {
+          if (seen && CONFIG.platform.vidPattern.test(id)) AppState.records[id] = true;
         }
       }
     }

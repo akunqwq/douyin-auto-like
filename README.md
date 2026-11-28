@@ -32,7 +32,7 @@ src/
 ├── utils.js         # 通用工具函数
 ├── state.js         # 全局状态与存储读取
 ├── platform.js      # 抖音页面识别
-├── records.js       # 当日记录与导出
+├── records.js       # 当日刷视频记录与导出
 ├── auto-like.js     # 自动点赞核心逻辑
 ├── sleep-timer.js   # 睡眠定时
 ├── ui/              # 面板样式、结构与交互

@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         抖音视频自动点赞Tampermonkey脚本
-// @version      2.12.0
+// @version      2.22.4
 // @description  自动点赞当前正在观看的未点赞视频、睡眠定时功能
 // @author       是阿鲲鸭
 // @match        https://www.douyin.com/*

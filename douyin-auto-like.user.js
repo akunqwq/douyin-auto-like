@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         抖音视频自动点赞Tampermonkey脚本
-// @version      2.12.0
+// @version      2.22.4
 // @description  自动点赞当前正在观看的未点赞视频、睡眠定时功能
 // @author       是阿鲲鸭
 // @match        https://www.douyin.com/*
@@ -84,8 +84,8 @@ const AppState = {
     const saved = GM_getValue(CONFIG.STORAGE_KEY, null);
     if (saved?.date === AppState.today) {
       if (saved.records && typeof saved.records === "object") {
-        for (const [id, viewed] of Object.entries(saved.records)) {
-          if (viewed && CONFIG.platform.vidPattern.test(id)) AppState.records[id] = true;
+        for (const [id, seen] of Object.entries(saved.records)) {
+          if (seen && CONFIG.platform.vidPattern.test(id)) AppState.records[id] = true;
         }
       }
     }
@@ -129,7 +129,10 @@ const Platform = {
     },
   };
 
-const Records = {
+// 当日刷视频记录：被 process() 识别并创建过会话的视频 ID 集合。
+  // 仅用于统计当日刷视频数量与导出，不代表已点赞 / 已看完 / 自动点赞成功，
+  // 不参与跨会话去重——是否再次进入自动点赞流程由 Session 维度决定。
+  const Records = {
     rolloverIfNeeded() {
       const now = formatDate(new Date());
       if (now === AppState.today) return;
@@ -153,6 +156,7 @@ const Records = {
       });
     },
 
+    // 会话创建即记录（由 createSession 调用），此时尚未点赞、尚未累计观看时长。
     record(id) {
       Records.rolloverIfNeeded();
       if (AppState.records[id]) return;
@@ -165,7 +169,7 @@ const Records = {
       Records.rolloverIfNeeded();
       const ids = Object.keys(AppState.records);
       if (!ids.length) {
-        GM_notification({ title: "抖音自动点赞", text: "今日暂无可导出的记录" });
+        GM_notification({ title: "抖音自动点赞", text: "今日暂无可导出的刷视频记录" });
         return;
       }
       const blob = new Blob([JSON.stringify({ date: AppState.today, total: ids.length, ids }, null, 2)], { type: "application/json" });
@@ -469,7 +473,7 @@ const UI = {
     <div class="dy-label">运行状态</div>
     <div class="dy-value" id="dy-status">未启动</div>
     <div class="dy-row">
-      <span class="dy-label">今日识别</span>
+      <span class="dy-label">今日刷视频</span>
       <span class="dy-value" id="dy-count">0 条</span>
     </div>
   </div>
@@ -647,7 +651,7 @@ UI.mount();
     }
   });
 
-  GM_registerMenuCommand("导出今日刷视频记录", Records.export);
+  GM_registerMenuCommand("今日刷视频记录导出", Records.export);
 
   Records.save();
   UI.updateUI();

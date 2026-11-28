@@ -38,7 +38,7 @@
     }
   });
 
-  GM_registerMenuCommand("导出今日刷视频记录", Records.export);
+  GM_registerMenuCommand("今日刷视频记录导出", Records.export);
 
   Records.save();
   UI.updateUI();
